@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import time
 import re
-import html  # For aggressive entity decoding
+import html # For aggressive entity decoding
 from playwright.sync_api import sync_playwright, Playwright
 from bs4 import BeautifulSoup
 
@@ -19,7 +19,13 @@ def get_detail_links(p: Playwright, search_url, column_name):
     """
     st.info(f"Step 1: Launching headless browser to fetch index page from {search_url}...")
     try:
-        browser = p.chromium.launch()
+        # --- MODIFIED FOR STREAMLIT CLOUD DEPLOYMENT ---
+        browser = p.chromium.launch(
+            executable_path="/usr/bin/chromium",
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
+        )
+        # ---------------------------------------------
         page = browser.new_page()
 
         # Go to the URL and wait for the network to be mostly idle
@@ -73,9 +79,17 @@ def scrape_tournament_detail(p: Playwright, event_name, url):
     """
     Stage 2: Uses Playwright to scrape a Tournament detail page for the TD's
     name and the now fully rendered email address.
+
+    NOTE: Timeout increased to 30s to prevent failures on slow-loading pages.
     """
     try:
-        browser = p.chromium.launch()
+        # --- MODIFIED FOR STREAMLIT CLOUD DEPLOYMENT ---
+        browser = p.chromium.launch(
+            executable_path="/usr/bin/chromium",
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
+        )
+        # ---------------------------------------------
         page = browser.new_page()
         page.goto(url, wait_until="domcontentloaded")
 
@@ -85,9 +99,8 @@ def scrape_tournament_detail(p: Playwright, event_name, url):
         page_content = page.content()
         browser.close()
     except Exception as e:
-        # Note: Removing Manual Search Query from the ERROR return as well
         return {"Name": event_name, "Tournament Director": "ERROR", "Email": f"Playwright/Request Failed: {e}",
-                "URL": url}
+                "URL": url, "Manual Search Query": ""}
 
     soup = BeautifulSoup(page_content, 'html.parser')
 
@@ -127,13 +140,18 @@ def scrape_tournament_detail(p: Playwright, event_name, url):
     if email != "Not Found":
         email = email.rstrip(';\'" ')
 
-    # Manual search query generation is REMOVED
+    # --- 4. Generate Manual Search Query if Email is Missing ---
+    manual_search_query = ""
+    if email == "Not Found" and tournament_director != "Not Found" and tournament_director != "Contact":
+        search_terms = f'"{tournament_director}" email "{event_name}" PDGA'
+        manual_search_query = search_terms
 
     return {
         "Name": event_name,
         "Tournament Director": tournament_director,
         "Email": email,
-        "URL": url
+        "URL": url,
+        "Manual Search Query": manual_search_query
     }
 
 
@@ -156,7 +174,13 @@ def scrape_course_detail(p: Playwright, course_name, url):
     using targeted selectors and full-page regex fallback.
     """
     try:
-        browser = p.chromium.launch()
+        # --- MODIFIED FOR STREAMLIT CLOUD DEPLOYMENT ---
+        browser = p.chromium.launch(
+            executable_path="/usr/bin/chromium",
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
+        )
+        # ---------------------------------------------
         page = browser.new_page()
 
         # Use a shorter, more reliable wait condition
@@ -168,9 +192,8 @@ def scrape_course_detail(p: Playwright, course_name, url):
         page_content = page.content()
         browser.close()
     except Exception as e:
-        # Note: Removing Manual Search Query from the ERROR return as well
         return {"Course": course_name, "Contact Name": "ERROR", "Phone": "Request Failed",
-                "Email": f"Playwright/Request Failed: {e}", "URL": url}
+                "Email": f"Playwright/Request Failed: {e}", "URL": url, "Manual Search Query": ""}
 
     soup = BeautifulSoup(page_content, 'html.parser')
 
@@ -190,7 +213,6 @@ def scrape_course_detail(p: Playwright, course_name, url):
         if contact_name_item:
             raw_name_text = contact_name_item.get_text(strip=True)
             contact_name = clean_contact_name(raw_name_text)
-
 
     # Target 1.2: Primary Phone Number (via specific ID)
     phone_field_wrapper = soup.find('div', class_='views-field-field-course-contact-home-phone-revision-id')
@@ -212,21 +234,10 @@ def scrape_course_detail(p: Playwright, course_name, url):
             if phone_match:
                 alt_phone = phone_match.group(0)
 
-    # Target 1.4: Email/Contact Link/Name (via email field ID - handles the name display structure)
+    # Target 1.4: Email/Contact Link (via email field ID)
     email_field_wrapper = soup.find('div', class_='views-field-field-course-contact-email-revision-id')
     provisional_contact_name = ""
     if email_field_wrapper:
-
-        # *** NEW: Robust Name Extraction from this wrapper (Handles the provided structure, e.g., Tom Jackson) ***
-        # This wrapper often contains the contact name directly if the main name field (Target 1.1) is empty.
-        if contact_name in ["Not Found", ""]:
-            # get_text(strip=True) will correctly combine <span class="views-label">Tom Jackson</span> #4217 -> "Tom Jackson #4217"
-            full_text_content = email_field_wrapper.get_text(strip=True)
-            # Ensure the content is substantive and not just an empty label/generic text
-            if full_text_content and not full_text_content.lower().startswith(('contact', 'email', 'form')):
-                contact_name = clean_contact_name(full_text_content)
-        # *** END NEW LOGIC ***
-
         # A. Check for direct MAILTO link first
         direct_email_match = email_field_wrapper.find('a', href=re.compile(r'^mailto:'))
         if direct_email_match:
@@ -239,10 +250,9 @@ def scrape_course_detail(p: Playwright, course_name, url):
             email = "FORM: " + BASE_URL + contact_form_link['href']
             provisional_contact_name = contact_form_link.get_text(strip=True)
 
-        # Use the anchor text as the Contact Name fallback if the name was not already set
+        # Use the anchor text as the Contact Name fallback if the main field was empty
         if provisional_contact_name and contact_name in ["Not Found", ""]:
             contact_name = clean_contact_name(provisional_contact_name)
-
 
     # --- 2. Fallback Search for Simple Contact Block (Manila Bay / Northside Park Style) ---
 
@@ -291,7 +301,7 @@ def scrape_course_detail(p: Playwright, course_name, url):
                     else:
                         contact_form_link = content_container.find('a', href=re.compile(r'^/course-contact\?course='))
                         if contact_form_link and email == "Not Found":
-                             email = "FORM: " + BASE_URL + contact_form_link['href']
+                            email = "FORM: " + BASE_URL + contact_form_link['href']
 
     # --- 3. AGGRESSIVE PRIORITY: Full-page Raw Content Search (Last resort) ---
     # Perform this search if a real email was NOT found (i.e., it's "Not Found" or the "FORM:" link)
@@ -335,14 +345,21 @@ def scrape_course_detail(p: Playwright, course_name, url):
     if (email != "Not Found" or final_phone_output != "Not Found") and contact_name in ["Not Found", ""]:
         contact_name = "Contact Info Found"
 
-    # Manual search query generation is REMOVED
+    # --- 5. Generate Manual Search Query if Email is Missing ---
+    manual_search_query = ""
+    # Check if a real email was NOT found (i.e., it's "Not Found" or the "FORM:" link)
+    if not (
+            '@' in email) and contact_name != "Not Found" and contact_name != "Contact Info Found" and contact_name != "":
+        search_terms = f'"{contact_name}" email "{course_name}" disc golf'
+        manual_search_query = search_terms
 
     return {
         "Course": course_name,
         "Contact Name": contact_name,
         "Phone": final_phone_output,
         "Email": email,
-        "URL": url
+        "URL": url,
+        "Manual Search Query": manual_search_query
     }
 
 
@@ -369,16 +386,14 @@ if mode == "Tournament Scraper":
     placeholder_url = "https://www.pdga.com/tour/search?date_filter%5Bmin%5D%5Bdate%5D=2025-10-09&date_filter%5Bmax%5D%5Bdate%5D=2026-10-09&State%5B%5D=CA&Tier%5B%5D=B"
     column_to_parse = "Name"
     scrape_detail_function = scrape_tournament_detail
-    # UPDATED: Removed "Manual Search Query"
-    result_columns = ["Name", "Tournament Director", "Email", "URL"]
+    result_columns = ["Name", "Tournament Director", "Email", "URL", "Manual Search Query"]
 
 else:  # Course Scraper
     # Updated placeholder URL to match user's example filter
     placeholder_url = "https://www.pdga.com/course-directory/advanced?title=&field_course_location_country=US&field_course_location_locality=&field_course_location_administrative_area=CA&field_course_type_value=All&rating_value=All&field_course_holes_value=1-9&field_course_total_length_value=All&field_course_target_type_value=Mach2&field_course_tee_type_value=All&field_location_type_value=All&field_course_camping_value=yes&field_course_facilities_value=All&field_course_fees_value=All&field_course_handicap_value=All&field_course_private_value=All&field_course_signage_value=All&field_cart_friendly_value=All"
     column_to_parse = "Course"
     scrape_detail_function = scrape_course_detail
-    # UPDATED: Removed "Manual Search Query"
-    result_columns = ["Course", "Contact Name", "Phone", "Email", "URL"]
+    result_columns = ["Course", "Contact Name", "Phone", "Email", "URL", "Manual Search Query"]
 
 # User Input
 input_url = st.text_input(
@@ -430,8 +445,6 @@ if st.button(f"Start {mode} Scrape 🎯 (Using Playwright)"):
 
             # 3. Display and export results
             final_df = pd.DataFrame(all_results)
-            # Filter columns based on the current mode
-            final_df = final_df[result_columns]
 
             st.subheader("Extracted Contact Information (Browser-Rendered)")
             st.dataframe(final_df, use_container_width=True)
