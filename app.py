@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import time
 import re
-import html # For aggressive entity decoding
+import html
 from playwright.sync_api import sync_playwright, Playwright
 from bs4 import BeautifulSoup
 
@@ -10,20 +10,18 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://www.pdga.com"
 
 
-# --- CORE SCRAPING FUNCTIONS (Now using fully rendered HTML from Playwright) ---
+# --- CORE SCRAPING FUNCTIONS ---
 
 def get_detail_links(p: Playwright, search_url, column_name):
     """
     Stage 1: Uses Playwright to load the search page, execute JavaScript,
-    and find links from the fully rendered table. Timeout reduced to 10s.
+    and find links from the fully rendered table.
     """
     st.info(f"Step 1: Launching headless browser to fetch index page from {search_url}...")
     try:
-        # --- MODIFIED FOR STREAMLIT CLOUD DEPLOYMENT ---
+        # --- SIMPLIFIED FOR STREAMLIT CLOUD AFTER 'playwright install' ---
         browser = p.chromium.launch(
-            executable_path="/usr/bin/chromium",
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
+            headless=True  # Keep headless mode enabled for server deployment
         )
         # ---------------------------------------------
         page = browser.new_page()
@@ -77,17 +75,12 @@ def get_detail_links(p: Playwright, search_url, column_name):
 
 def scrape_tournament_detail(p: Playwright, event_name, url):
     """
-    Stage 2: Uses Playwright to scrape a Tournament detail page for the TD's
-    name and the now fully rendered email address.
-
-    NOTE: Timeout increased to 30s to prevent failures on slow-loading pages.
+    Tournament Scraper (MODIFIED: Removed Manual Search Query logic.)
     """
     try:
-        # --- MODIFIED FOR STREAMLIT CLOUD DEPLOYMENT ---
+        # --- SIMPLIFIED FOR STREAMLIT CLOUD AFTER 'playwright install' ---
         browser = p.chromium.launch(
-            executable_path="/usr/bin/chromium",
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
+            headless=True
         )
         # ---------------------------------------------
         page = browser.new_page()
@@ -99,8 +92,9 @@ def scrape_tournament_detail(p: Playwright, event_name, url):
         page_content = page.content()
         browser.close()
     except Exception as e:
+        # Removed "Manual Search Query" from return dict
         return {"Name": event_name, "Tournament Director": "ERROR", "Email": f"Playwright/Request Failed: {e}",
-                "URL": url, "Manual Search Query": ""}
+                "URL": url}
 
     soup = BeautifulSoup(page_content, 'html.parser')
 
@@ -140,25 +134,25 @@ def scrape_tournament_detail(p: Playwright, event_name, url):
     if email != "Not Found":
         email = email.rstrip(';\'" ')
 
-    # --- 4. Generate Manual Search Query if Email is Missing ---
-    manual_search_query = ""
-    if email == "Not Found" and tournament_director != "Not Found" and tournament_director != "Contact":
-        search_terms = f'"{tournament_director}" email "{event_name}" PDGA'
-        manual_search_query = search_terms
+    # Removed Manual Search Query Generation logic
 
+    # Final return dictionary simplified
     return {
         "Name": event_name,
         "Tournament Director": tournament_director,
         "Email": email,
         "URL": url,
-        "Manual Search Query": manual_search_query
     }
 
 
 def clean_contact_name(raw_name_text):
-    """Strips the optional '#PDGA_NUMBER' suffix from a contact name."""
+    """Strips the optional '#PDGA_NUMBER' suffix from a contact name and 'Email:' prefix."""
     if not raw_name_text:
         return "Not Found"
+
+    # NEW: Remove "Email:" prefix if present (fixes "Email:Bill Fratzke")
+    if raw_name_text.lower().startswith("email:"):
+        raw_name_text = raw_name_text[len("email:"):].strip()
 
     # This regex captures the name (group 1) and optionally ignores '#\d+' at the end.
     raw_name_text = raw_name_text.strip()
@@ -170,15 +164,13 @@ def clean_contact_name(raw_name_text):
 
 def scrape_course_detail(p: Playwright, course_name, url):
     """
-    Stage 2: Aggressive scraping of a Course detail page for contact info,
-    using targeted selectors and full-page regex fallback.
+    Course Scraper (MODIFIED: Cleaned up Contact Name and Phone formatting.
+    Removed Manual Search Query logic.)
     """
     try:
-        # --- MODIFIED FOR STREAMLIT CLOUD DEPLOYMENT ---
+        # --- SIMPLIFIED FOR STREAMLIT CLOUD AFTER 'playwright install' ---
         browser = p.chromium.launch(
-            executable_path="/usr/bin/chromium",
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
+            headless=True
         )
         # ---------------------------------------------
         page = browser.new_page()
@@ -192,8 +184,9 @@ def scrape_course_detail(p: Playwright, course_name, url):
         page_content = page.content()
         browser.close()
     except Exception as e:
+        # Removed "Manual Search Query" from return dict
         return {"Course": course_name, "Contact Name": "ERROR", "Phone": "Request Failed",
-                "Email": f"Playwright/Request Failed: {e}", "URL": url, "Manual Search Query": ""}
+                "Email": f"Playwright/Request Failed: {e}", "URL": url}
 
     soup = BeautifulSoup(page_content, 'html.parser')
 
@@ -237,14 +230,21 @@ def scrape_course_detail(p: Playwright, course_name, url):
     # Target 1.4: Email/Contact Link (via email field ID)
     email_field_wrapper = soup.find('div', class_='views-field-field-course-contact-email-revision-id')
     provisional_contact_name = ""
+
     if email_field_wrapper:
+
+        # FIX for Northside Park structure: grabs name from field text, e.g., 'Tom Jackson #4217'
+        contact_field_text = email_field_wrapper.get_text(strip=True)
+        if contact_field_text and contact_name in ["Not Found", ""]:
+            contact_name = clean_contact_name(contact_field_text)
+
         # A. Check for direct MAILTO link first
         direct_email_match = email_field_wrapper.find('a', href=re.compile(r'^mailto:'))
         if direct_email_match:
             email = direct_email_match['href'].replace('mailto:', '').strip()
             provisional_contact_name = direct_email_match.get_text(strip=True)
 
-        # B. Check for Contact Form link (The common obfuscation)
+        # B. Check for Contact Form link
         contact_form_link = email_field_wrapper.find('a', href=re.compile(r'^/course-contact\?course='))
         if email == "Not Found" and contact_form_link:
             email = "FORM: " + BASE_URL + contact_form_link['href']
@@ -254,46 +254,37 @@ def scrape_course_detail(p: Playwright, course_name, url):
         if provisional_contact_name and contact_name in ["Not Found", ""]:
             contact_name = clean_contact_name(provisional_contact_name)
 
-    # --- 2. Fallback Search for Simple Contact Block (Manila Bay / Northside Park Style) ---
+    # --- 2. Fallback Search for Simple Contact Block ---
 
-    # Check for the contact section header
     contact_block_header = soup.find('h3', string=re.compile(r'Contact'))
 
     # If we still haven't found a decent contact name, look immediately after the 'Contact' header
     if contact_block_header and contact_name in ["Not Found", ""]:
-        # Find the next sibling that contains text before the next <h3> or <div>
-
-        # Look for the contact name right after the 'Contact' header
-        # The structure is often <h3>Contact</h3> <text>Tom Jackson #4217</text> <br> <text>Phone: ...</text>
         name_tag = contact_block_header.find_next_sibling(text=True)
         if name_tag:
-            # Check the raw text node for the name (e.g., 'Tom Jackson #4217\n')
             name_text = name_tag.strip()
             if name_text and len(name_text) > 3 and not name_text.lower().startswith('phone'):
                 contact_name = clean_contact_name(name_text)
 
-    # Now, check the general content container for email/phone if we still haven't found it.
+    # Now, check the general content container for email/phone
     if contact_block_header:
-        # Find the parent container that holds the content after the header
         parent_div = contact_block_header.find_parent('div')
         if parent_div:
-            # Look for the immediate next sibling which often holds the content in simple structures
             content_container = parent_div.find_next_sibling('div') or parent_div.find_next_sibling('p')
 
             if content_container:
                 contact_block_content = content_container.get_text()
 
-                # Re-check for phone (e.g., "Alt. Phone: 707-445-3309")
+                # Re-check for phone
                 alt_phone_match = re.search(r'(?:Alt\.\s*Phone|Phone|Contact):\s*(' + phone_pattern + r')',
                                             contact_block_content)
                 if alt_phone_match:
-                    # We prioritize filling the main phone first, then alt_phone
                     if phone == "Not Found":
                         phone = alt_phone_match.group(1)
                     elif alt_phone == "Not Found":
                         alt_phone = alt_phone_match.group(1)
 
-                # Re-check for email link (sometimes email links are separate from name link)
+                # Re-check for email link
                 if email == "Not Found" or email.startswith("FORM:"):
                     email_link_tag = content_container.find('a', href=re.compile(r'^mailto:'))
                     if email_link_tag:
@@ -303,17 +294,14 @@ def scrape_course_detail(p: Playwright, course_name, url):
                         if contact_form_link and email == "Not Found":
                             email = "FORM: " + BASE_URL + contact_form_link['href']
 
-    # --- 3. AGGRESSIVE PRIORITY: Full-page Raw Content Search (Last resort) ---
-    # Perform this search if a real email was NOT found (i.e., it's "Not Found" or the "FORM:" link)
+    # --- 3. AGGRESSIVE PRIORITY: Full-page Raw Content Search ---
     if not ('@' in email):
-        # Aggressive decoding of HTML entities
         decoded_page_content = page_content
         try:
             decoded_page_content = html.unescape(page_content)
         except Exception:
             pass
 
-            # Check for direct MAILTO link anywhere in the page
         if email == "Not Found" or email.startswith("FORM:"):
             mailto_tags = soup.find_all('a', href=re.compile(r'^mailto:'))
             if mailto_tags:
@@ -323,47 +311,44 @@ def scrape_course_detail(p: Playwright, course_name, url):
                         email = candidate_email
                         break
 
-        # Search the ENTIRE DECODED content for an exact email string
         if email == "Not Found" or email.startswith("FORM:"):
             direct_email_match = re.search(email_pattern, decoded_page_content, re.IGNORECASE)
             if direct_email_match:
-                # If we found an email via regex, prioritize it over the FORM link
                 email = direct_email_match.group(1).strip()
 
     # E. Final Cleanup
     if email != "Not Found" and not email.startswith("FORM: "):
         email = email.rstrip(';\'" ')
 
-    # --- 4. Combine Phone Results ---
+    # --- 4. Combine Phone Results (MODIFIED: Removed 'Alt:' and 'Main:' prefixes) ---
     final_phone_output = phone
     if phone == "Not Found" and alt_phone != "Not Found":
-        final_phone_output = f"Alt: {alt_phone}"
+        final_phone_output = alt_phone
     elif phone != "Not Found" and alt_phone != "Not Found":
-        final_phone_output = f"Main: {phone}, Alt: {alt_phone}"
+        # Keep phones separated by comma if both exist, without prefixes
+        final_phone_output = f"{phone}, {alt_phone}"
+
+    # If the combined output is still 'Not Found', replace with an empty string for cleaner display
+    if final_phone_output == "Not Found":
+        final_phone_output = ""
 
     # Handle the case where the email/phone was found but name wasn't
-    if (email != "Not Found" or final_phone_output != "Not Found") and contact_name in ["Not Found", ""]:
+    if (email != "Not Found" or final_phone_output != "") and contact_name in ["Not Found", ""]:
         contact_name = "Contact Info Found"
 
-    # --- 5. Generate Manual Search Query if Email is Missing ---
-    manual_search_query = ""
-    # Check if a real email was NOT found (i.e., it's "Not Found" or the "FORM:" link)
-    if not (
-            '@' in email) and contact_name != "Not Found" and contact_name != "Contact Info Found" and contact_name != "":
-        search_terms = f'"{contact_name}" email "{course_name}" disc golf'
-        manual_search_query = search_terms
+    # Removed Manual Search Query Generation logic
 
+    # Final return dictionary simplified
     return {
         "Course": course_name,
         "Contact Name": contact_name,
         "Phone": final_phone_output,
         "Email": email,
         "URL": url,
-        "Manual Search Query": manual_search_query
     }
 
 
-# --- STREAMLIT APP LAYOUT ---
+# --- STREAMLIT APP LAYOUT (MODIFIED: Updated result_columns) ---
 
 st.set_page_config(layout="wide", page_title="PDGA Contact Scraper")
 st.title("PDGA Event & Course Contact Scraper (Playwright) 📧")
@@ -386,14 +371,15 @@ if mode == "Tournament Scraper":
     placeholder_url = "https://www.pdga.com/tour/search?date_filter%5Bmin%5D%5Bdate%5D=2025-10-09&date_filter%5Bmax%5D%5Bdate%5D=2026-10-09&State%5B%5D=CA&Tier%5B%5D=B"
     column_to_parse = "Name"
     scrape_detail_function = scrape_tournament_detail
-    result_columns = ["Name", "Tournament Director", "Email", "URL", "Manual Search Query"]
+    # UPDATED: Removed "Manual Search Query"
+    result_columns = ["Name", "Tournament Director", "Email", "URL"]
 
 else:  # Course Scraper
-    # Updated placeholder URL to match user's example filter
     placeholder_url = "https://www.pdga.com/course-directory/advanced?title=&field_course_location_country=US&field_course_location_locality=&field_course_location_administrative_area=CA&field_course_type_value=All&rating_value=All&field_course_holes_value=1-9&field_course_total_length_value=All&field_course_target_type_value=Mach2&field_course_tee_type_value=All&field_location_type_value=All&field_course_camping_value=yes&field_course_facilities_value=All&field_course_fees_value=All&field_course_handicap_value=All&field_course_private_value=All&field_course_signage_value=All&field_cart_friendly_value=All"
     column_to_parse = "Course"
     scrape_detail_function = scrape_course_detail
-    result_columns = ["Course", "Contact Name", "Phone", "Email", "URL", "Manual Search Query"]
+    # UPDATED: Removed "Manual Search Query"
+    result_columns = ["Course", "Contact Name", "Phone", "Email", "URL"]
 
 # User Input
 input_url = st.text_input(
@@ -445,6 +431,8 @@ if st.button(f"Start {mode} Scrape 🎯 (Using Playwright)"):
 
             # 3. Display and export results
             final_df = pd.DataFrame(all_results)
+            # Select only the columns defined in result_columns for display/download
+            final_df = final_df[result_columns]
 
             st.subheader("Extracted Contact Information (Browser-Rendered)")
             st.dataframe(final_df, use_container_width=True)
