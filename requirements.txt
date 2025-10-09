@@ -3,4 +3,3 @@ pandas
 beautifulsoup4
 playwright
 
-playwright install chromium
