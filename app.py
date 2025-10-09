@@ -5,6 +5,14 @@ import re
 import html
 from playwright.sync_api import sync_playwright, Playwright
 from bs4 import BeautifulSoup
+import os # <-- ADDED OS IMPORT HERE
+
+# --- CRITICAL FIX FOR STREAMLIT DEPLOYMENT ---
+# This line tells the Playwright Python library the exact location where the
+# browser executable was installed by the 'post_install.sh' script in the
+# Streamlit deployment environment, resolving the "Executable doesn't exist" error.
+os.environ['PLAYWRIGHT_BROWSERS_PATH'] = os.getcwd() + '/browser_cache'
+# --- END OF CRITICAL FIX ---
 
 # Base URL for PDGA site
 BASE_URL = "https://www.pdga.com"
@@ -38,6 +46,8 @@ def get_detail_links(p: Playwright, search_url, column_name):
 
     except Exception as e:
         st.error(f"Error fetching search URL with Playwright: {e}")
+        # Added a path check to help with future debugging if needed
+        st.error(f"Playwright Path Check: {os.environ.get('PLAYWRIGHT_BROWSERS_PATH')}")
         return []
 
     soup = BeautifulSoup(page_content, 'html.parser')
