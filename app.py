@@ -11,7 +11,8 @@ import os # <-- ADDED OS IMPORT HERE
 # This line tells the Playwright Python library the exact location where the
 # browser executable was installed by the 'post_install.sh' script in the
 # Streamlit deployment environment, resolving the "Executable doesn't exist" error.
-os.environ['PLAYWRIGHT_BROWSERS_PATH'] = os.getcwd() + '/browser_cache'
+# **LOCAL FIX: The line below is COMMENTED OUT to allow the app to run locally.**
+# os.environ['PLAYWRIGHT_BROWSERS_PATH'] = os.getcwd() + '/browser_cache'
 # --- END OF CRITICAL FIX ---
 
 # Base URL for PDGA site
