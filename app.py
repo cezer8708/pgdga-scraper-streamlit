@@ -36,6 +36,7 @@ IS_WINDOWS = os.name == "nt"
 BASE_URL = "https://www.pdga.com"
 DEFAULT_MS_PATH = Path.home() / ".cache" / "ms-playwright"
 PLAYWRIGHT_LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"] if IS_LINUX else []
+PLAYWRIGHT_CHANNEL = "chromium"
 EMAIL_PATTERN = r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
 NOT_FOUND = "Not Found"
 
@@ -59,7 +60,7 @@ def _list_ms_cache_tree(base: Path) -> str:
         return f"<error listing cache: {exc}>"
 
 
-def _chromium_or_headless_present(base: Path) -> bool:
+def _chromium_present(base: Path) -> bool:
     """Return True when a runnable Chromium binary is already present."""
     try:
         if not base.exists():
@@ -68,11 +69,11 @@ def _chromium_or_headless_present(base: Path) -> bool:
         for revision in base.iterdir():
             if not revision.is_dir():
                 continue
-            if not revision.name.startswith(("chromium", "chromium_headless_shell")):
+            if not revision.name.startswith("chromium"):
                 continue
 
             chrome_dir = revision / "chrome-linux"
-            if chrome_dir.exists() and ((chrome_dir / "chrome").exists() or (chrome_dir / "headless_shell").exists()):
+            if chrome_dir.exists() and (chrome_dir / "chrome").exists():
                 return True
     except Exception:
         return False
@@ -81,19 +82,19 @@ def _chromium_or_headless_present(base: Path) -> bool:
 
 
 def ensure_playwright_browsers_linux() -> None:
-    """Install Playwright browsers on Linux if the default cache is empty."""
+    """Install Chromium on Linux if the default Playwright cache is empty."""
     if not IS_LINUX:
         return
 
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(DEFAULT_MS_PATH)
     DEFAULT_MS_PATH.mkdir(parents=True, exist_ok=True)
 
-    if _chromium_or_headless_present(DEFAULT_MS_PATH):
+    if _chromium_present(DEFAULT_MS_PATH):
         return
 
     try:
         subprocess.run(
-            [sys.executable, "-m", "playwright", "install"],
+            [sys.executable, "-m", "playwright", "install", "chromium"],
             check=True,
             capture_output=True,
             text=True,
@@ -368,7 +369,11 @@ def run_scrape(
     st.header("Scraping Results")
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, args=PLAYWRIGHT_LAUNCH_ARGS)
+        browser = playwright.chromium.launch(
+            headless=True,
+            channel=PLAYWRIGHT_CHANNEL,
+            args=PLAYWRIGHT_LAUNCH_ARGS,
+        )
         try:
             detail_links = get_detail_links(browser, input_url, column_to_parse, True)
             if not detail_links:
