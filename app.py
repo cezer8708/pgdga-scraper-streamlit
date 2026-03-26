@@ -505,14 +505,15 @@ def main() -> None:
     text-align: center;
     gap: 0.7rem;
     margin-bottom: 2rem;
-    padding: 1.5rem 1.5rem;
+    padding: 1.85rem 1.5rem 1.6rem;
     border: 1px solid rgba(66, 135, 245, 0.18);
     border-radius: 24px;
     background: linear-gradient(180deg, rgba(22,24,31,0.98), rgba(15,16,22,0.98));
+    overflow: visible;
 }
 .brand-logo-img {
     display: block;
-    width: 230px;
+    width: 205px;
     height: auto;
     margin: 0 auto;
 }
@@ -587,7 +588,7 @@ def main() -> None:
 .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
 @media (max-width: 900px) {
     .brand-logo-img {
-        width: 190px;
+        width: 170px;
     }
     .run-stats-grid {
         grid-template-columns: 1fr;
