@@ -499,19 +499,25 @@ def main() -> None:
 .block-container { padding-top: 1.5rem; max-width: 1400px; }
 .brand-hero {
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 1.5rem;
+    justify-content: center;
+    text-align: center;
+    gap: 0.7rem;
     margin-bottom: 2rem;
-    padding: 1.25rem 1.5rem;
+    padding: 1.5rem 1.5rem;
     border: 1px solid rgba(66, 135, 245, 0.18);
     border-radius: 24px;
     background: linear-gradient(180deg, rgba(22,24,31,0.98), rgba(15,16,22,0.98));
 }
 .brand-logo-img {
     display: block;
-    width: 260px;
+    width: 230px;
     height: auto;
-    flex: 0 0 auto;
+    margin: 0 auto;
+}
+.brand-text {
+    text-align: center;
 }
 .brand-text h1 {
     margin: 0;
@@ -519,7 +525,7 @@ def main() -> None:
     line-height: 1.1;
 }
 .brand-text p {
-    margin: 0.45rem 0 0;
+    margin: 0.1rem 0 0;
     color: rgba(250, 250, 250, 0.72);
     font-size: 0.98rem;
 }
@@ -580,12 +586,8 @@ def main() -> None:
 .stButton>button { border-radius: 0.5rem; transition: all 0.2s; }
 .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
 @media (max-width: 900px) {
-    .brand-hero {
-        flex-direction: column;
-        align-items: flex-start;
-    }
     .brand-logo-img {
-        width: 220px;
+        width: 190px;
     }
     .run-stats-grid {
         grid-template-columns: 1fr;
