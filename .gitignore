@@ -1,0 +1,15 @@
+# Playwright browser caches (mac/linux)
+.cache_playwright/
+.cache/ms-playwright/
+ms-playwright/
+playwright/.cache/
+venv_dga/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+**/chrome-mac/
+**/chrome-linux/
+**/chromium-*/
+**/chromium_headless_shell-*/
+**/ffmpeg-*/

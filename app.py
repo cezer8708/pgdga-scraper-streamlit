@@ -1,460 +1,527 @@
-import streamlit as st
-import pandas as pd
-import time
-import re
 import html
-from playwright.sync_api import sync_playwright, Playwright
+import os
+import re
+import subprocess
+import sys
+import time
+import base64
+from pathlib import Path
+from typing import Optional
+
+import pandas as pd
+import streamlit as st
 from bs4 import BeautifulSoup
-import os # <-- ADDED OS IMPORT HERE
 
-# --- CRITICAL FIX FOR STREAMLIT DEPLOYMENT ---
-# This line tells the Playwright Python library the exact location where the
-# browser executable was installed by the 'post_install.sh' script in the
-# Streamlit deployment environment, resolving the "Executable doesn't exist" error.
-# **LOCAL FIX: The line below is COMMENTED OUT to allow the app to run locally.**
-# os.environ['PLAYWRIGHT_BROWSERS_PATH'] = os.getcwd() + '/browser_cache'
-# --- END OF CRITICAL FIX ---
+APP_DIR = Path(__file__).resolve().parent
+LOGO_CANDIDATES = [
+    Path("/Users/cesarzermeno/Desktop/Back Ups/Custom_Stamp_Tool/dga-logo.png"),
+    APP_DIR / "dga_logo.png",
+    APP_DIR / "dga-logo.png",
+    APP_DIR / "DGA_logo.png",
+    APP_DIR / "DGA Logo.png",
+    APP_DIR / "assets" / "dga_logo.png",
+    APP_DIR / "assets" / "dga-logo.png",
+]
 
-# Base URL for PDGA site
+st.set_page_config(
+    layout="wide",
+    page_title="PDGA Event Contact Scraper",
+    initial_sidebar_state="collapsed",
+)
+
+IS_LINUX = sys.platform.startswith("linux")
+IS_DARWIN = sys.platform.startswith("darwin")
+IS_WINDOWS = os.name == "nt"
+
 BASE_URL = "https://www.pdga.com"
+DEFAULT_MS_PATH = Path.home() / ".cache" / "ms-playwright"
+PLAYWRIGHT_LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"] if IS_LINUX else []
+EMAIL_PATTERN = r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
+NOT_FOUND = "Not Found"
 
 
-# --- CORE SCRAPING FUNCTIONS ---
-
-def get_detail_links(p: Playwright, search_url, column_name):
-    """
-    Stage 1: Uses Playwright to load the search page, execute JavaScript,
-    and find links from the fully rendered table.
-    """
-    st.info(f"Step 1: Launching headless browser to fetch index page from {search_url}...")
+def _list_ms_cache_tree(base: Path) -> str:
+    """Return a simple directory summary for the Playwright cache."""
     try:
-        # --- SIMPLIFIED FOR STREAMLIT CLOUD AFTER 'playwright install' ---
-        browser = p.chromium.launch(
-            headless=True  # Keep headless mode enabled for server deployment
+        if not base.exists():
+            return "<cache dir not created>"
+
+        lines: list[str] = []
+        for revision in sorted(base.iterdir()):
+            if not revision.is_dir():
+                continue
+            chrome_dir = revision / "chrome-linux"
+            has_chrome = (chrome_dir / "chrome").exists()
+            has_shell = (chrome_dir / "headless_shell").exists()
+            lines.append(f"{revision.name}/chrome-linux -> chrome:{has_chrome} headless_shell:{has_shell}")
+        return "\n".join(lines) if lines else "<empty>"
+    except Exception as exc:
+        return f"<error listing cache: {exc}>"
+
+
+def _chromium_or_headless_present(base: Path) -> bool:
+    """Return True when a runnable Chromium binary is already present."""
+    try:
+        if not base.exists():
+            return False
+
+        for revision in base.iterdir():
+            if not revision.is_dir():
+                continue
+            if not revision.name.startswith(("chromium", "chromium_headless_shell")):
+                continue
+
+            chrome_dir = revision / "chrome-linux"
+            if chrome_dir.exists() and ((chrome_dir / "chrome").exists() or (chrome_dir / "headless_shell").exists()):
+                return True
+    except Exception:
+        return False
+
+    return False
+
+
+def ensure_playwright_browsers_linux() -> None:
+    """Install Playwright browsers on Linux if the default cache is empty."""
+    if not IS_LINUX:
+        return
+
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(DEFAULT_MS_PATH)
+    DEFAULT_MS_PATH.mkdir(parents=True, exist_ok=True)
+
+    if _chromium_or_headless_present(DEFAULT_MS_PATH):
+        return
+
+    try:
+        st.info("Playwright: installing browsers into default cache (first run only)...")
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install"],
+            check=True,
+            capture_output=True,
+            text=True,
         )
-        # ---------------------------------------------
-        page = browser.new_page()
+    except subprocess.CalledProcessError as exc:
+        st.warning("Playwright install reported an error. The app will still try to launch.")
+        if exc.stdout:
+            st.code(exc.stdout, language="bash")
+        if exc.stderr:
+            st.code(exc.stderr, language="bash")
 
-        # Go to the URL and wait for the network to be mostly idle
-        page.goto(search_url, wait_until="domcontentloaded")
+    st.caption("Playwright cache contents after install attempt:")
+    st.code(_list_ms_cache_tree(DEFAULT_MS_PATH))
 
-        # Wait specifically for the data table (Timeout reduced to 10s)
-        page.wait_for_selector('table.views-table', timeout=10000)
 
-        # Get the fully rendered HTML content
-        page_content = page.content()
-        browser.close()
+ensure_playwright_browsers_linux()
 
-    except Exception as e:
-        st.error(f"Error fetching search URL with Playwright: {e}")
-        # Added a path check to help with future debugging if needed
-        st.error(f"Playwright Path Check: {os.environ.get('PLAYWRIGHT_BROWSERS_PATH')}")
+from playwright.sync_api import Browser, sync_playwright
+
+
+def platform_label() -> str:
+    if IS_DARWIN:
+        return "macOS"
+    if IS_WINDOWS:
+        return "Windows"
+    return sys.platform
+
+
+def decode_html(text: str) -> str:
+    try:
+        return html.unescape(text)
+    except Exception:
+        return text
+
+
+def sanitize_email(value: str) -> str:
+    if value != NOT_FOUND and not value.startswith("FORM: "):
+        return value.rstrip(";\'\" ")
+    return value
+
+
+def get_logo_path() -> Optional[Path]:
+    for candidate in LOGO_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def get_logo_data_uri() -> Optional[str]:
+    logo_path = get_logo_path()
+    if not logo_path:
+        return None
+
+    encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def render_status_log(container, title: str, lines: list[str]) -> None:
+    body = "\n".join(f"- {line}" for line in lines)
+    container.markdown(f"**{title}**\n\n{body}")
+
+
+def fetch_page_content(
+    browser: Browser,
+    url: str,
+    *,
+    wait_until: str = "domcontentloaded",
+    selector: Optional[str] = None,
+    timeout: int = 30000,
+    settle_seconds: float = 0,
+) -> str:
+    """Open a page, wait for the relevant DOM, then return the rendered HTML."""
+    page = browser.new_page()
+    try:
+        page.goto(url, wait_until=wait_until)
+        if selector:
+            page.wait_for_selector(selector, timeout=timeout)
+        if settle_seconds:
+            time.sleep(settle_seconds)
+        return page.content()
+    finally:
+        page.close()
+
+
+def extract_first_email(soup: BeautifulSoup, page_content: str) -> str:
+    """Return the first mailto email or a raw email match from the page."""
+    for tag in soup.find_all("a", href=re.compile(r"^mailto:")):
+        candidate = tag["href"].replace("mailto:", "").strip()
+        if "@" in candidate:
+            return sanitize_email(candidate)
+
+    match = re.search(EMAIL_PATTERN, decode_html(page_content), re.IGNORECASE)
+    if match:
+        return sanitize_email(match.group(1).strip())
+
+    return NOT_FOUND
+
+
+def parse_table_headers(table: BeautifulSoup) -> list[str]:
+    header_row = table.find("thead")
+    if not header_row:
         return []
+    return [header.get_text(strip=True) for header in header_row.find_all("th")]
 
-    soup = BeautifulSoup(page_content, 'html.parser')
-    table = soup.find('table', class_='views-table')
 
+def resolve_target_column(headers: list[str], requested_column: str) -> Optional[str]:
+    if requested_column in headers:
+        return requested_column
+
+    fallback_column = "Name" if requested_column == "Course" else "Course"
+    if fallback_column in headers:
+        return fallback_column
+
+    return None
+
+
+def scrape_page_links(page_content: str, column_name: str, is_tournament_mode: bool) -> tuple[list[tuple], Optional[str], str]:
+    """Scrape the listing rows from a PDGA search results page."""
+    soup = BeautifulSoup(page_content, "html.parser")
+    table = soup.find("table", class_="views-table")
     if not table:
-        st.warning("No data table found on the fully rendered page. Check your URL filters.")
-        return []
+        return [], None, column_name
 
-    # Find the header index for the target column
-    headers = [th.get_text(strip=True) for th in table.find('thead').find_all('th')]
+    headers = parse_table_headers(table)
+    resolved_column = resolve_target_column(headers, column_name)
+    if not resolved_column:
+        st.error(f"Could not find a valid target column in the table headers: {headers}")
+        return [], None, column_name
 
-    # Check for the correct column name based on the mode
-    if column_name not in headers:
-        st.error(f"Could not find column '{column_name}' in the table headers: {headers}")
-        return []
+    name_col_index = headers.index(resolved_column)
+    dates_col_index = headers.index("Dates") if is_tournament_mode and "Dates" in headers else -1
 
-    col_index = headers.index(column_name)
+    if is_tournament_mode and dates_col_index == -1:
+        st.warning("Could not find 'Dates' column for tournament scraping.")
 
-    detail_links = []
+    all_links: list[tuple] = []
+    tbody = table.find("tbody")
+    if tbody:
+        for row in tbody.find_all("tr"):
+            cells = row.find_all("td")
+            if len(cells) <= name_col_index:
+                continue
 
-    # Iterate through table rows (excluding the header)
-    for row in table.find('tbody').find_all('tr'):
-        cells = row.find_all('td')
-        if len(cells) > col_index:
-            link_tag = cells[col_index].find('a', href=True)
-            if link_tag:
-                full_link = BASE_URL + link_tag['href']
-                item_name = link_tag.get_text(strip=True)
-                detail_links.append((item_name, full_link))
+            link_tag = cells[name_col_index].find("a", href=True)
+            if not link_tag:
+                continue
 
-    st.success(f"Found {len(detail_links)} detail pages to scrape.")
+            full_link = BASE_URL + link_tag["href"]
+            item_name = link_tag.get_text(strip=True)
+
+            if is_tournament_mode:
+                dates = cells[dates_col_index].get_text(strip=True) if len(cells) > dates_col_index >= 0 else ""
+                all_links.append((item_name, full_link, dates))
+            else:
+                all_links.append((item_name, full_link))
+
+    next_link = soup.find("a", title="Go to next page")
+    next_url = BASE_URL + next_link["href"] if next_link and next_link.get("href") else None
+    return all_links, next_url, resolved_column
+
+
+def get_detail_links(browser: Browser, search_url: str, column_name: str, is_tournament_mode: bool) -> list[tuple]:
+    """Walk the paginated result set and collect all detail page links."""
+    status_box = st.empty()
+    status_lines = [f"Loading index pages from `{search_url}`"]
+    render_status_log(status_box, "Index Progress", status_lines)
+
+    detail_links: list[tuple] = []
+    page_count = 0
+    current_url = search_url
+    final_target_column = column_name
+
+    try:
+        while current_url:
+            page_count += 1
+            status_lines.append(f"Processing results page {page_count}")
+            render_status_log(status_box, "Index Progress", status_lines)
+
+            page_content = fetch_page_content(
+                browser,
+                current_url,
+                wait_until="domcontentloaded",
+                selector="table.views-table",
+                timeout=15000,
+            )
+            new_links, next_url, resolved_column = scrape_page_links(page_content, column_name, is_tournament_mode)
+            final_target_column = resolved_column
+            detail_links.extend(new_links)
+
+            if new_links:
+                status_lines.append(f"Found {len(new_links)} events on page {page_count}")
+                render_status_log(status_box, "Index Progress", status_lines)
+
+            current_url = next_url if next_url and next_url != current_url else None
+
+        status_lines.append(f"Finished pagination after {page_count} page(s)")
+    except Exception as exc:
+        st.error(f"An error occurred during pagination on page {page_count}. Stopping. Error: {exc}")
+
+    status_lines.append(
+        f"Collected {len(detail_links)} detail page(s) using column `{final_target_column}`"
+    )
+    render_status_log(status_box, "Index Progress", status_lines)
     return detail_links
 
 
-def scrape_tournament_detail(p: Playwright, event_name, url):
-    """
-    Tournament Scraper (MODIFIED: Removed Manual Search Query logic.)
-    """
+def scrape_tournament_detail(
+    browser: Browser,
+    event_name: str,
+    url: str,
+    dates: str,
+    tier_label: str,
+) -> dict[str, str]:
+    """Scrape tournament contact details from the event page."""
     try:
-        # --- SIMPLIFIED FOR STREAMLIT CLOUD AFTER 'playwright install' ---
-        browser = p.chromium.launch(
-            headless=True
+        page_content = fetch_page_content(
+            browser,
+            url,
+            wait_until="domcontentloaded",
+            selector='a[href*="/general-contact?pdganum="]',
         )
-        # ---------------------------------------------
-        page = browser.new_page()
-        page.goto(url, wait_until="domcontentloaded")
+    except Exception as exc:
+        return {
+            "Name": event_name,
+            "Dates": dates,
+            "Tier": tier_label,
+            "Tournament Director": "ERROR",
+            "Email": f"Playwright/Request Failed: {exc}",
+            "URL": url,
+        }
 
-        # Wait for a key element (director link) - Timeout INCREASED to 30s
-        page.wait_for_selector('a[href*="/general-contact?pdganum="]', timeout=30000)
+    soup = BeautifulSoup(page_content, "html.parser")
+    td_link = soup.find("a", href=re.compile(r"/general-contact\?pdganum="))
+    tournament_director = td_link.get_text(strip=True) if td_link else NOT_FOUND
+    email = extract_first_email(soup, page_content)
 
-        page_content = page.content()
-        browser.close()
-    except Exception as e:
-        # Removed "Manual Search Query" from return dict
-        return {"Name": event_name, "Tournament Director": "ERROR", "Email": f"Playwright/Request Failed: {e}",
-                "URL": url}
-
-    soup = BeautifulSoup(page_content, 'html.parser')
-
-    tournament_director = "Not Found"
-    email = "Not Found"
-    email_pattern = r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
-
-    # --- 1. Scrape Tournament Director Name ---
-    td_link = soup.find('a', href=re.compile(r'/general-contact\?pdganum='))
-    if td_link:
-        tournament_director = td_link.get_text(strip=True)
-
-    # --- 2. PRIORITY 1: ROBUST MAILTO SEARCH ---
-    mailto_tags = soup.find_all('a', href=re.compile(r'^mailto:'))
-    if mailto_tags:
-        for tag in mailto_tags:
-            candidate_email = tag['href'].replace('mailto:', '').strip()
-            if candidate_email and '@' in candidate_email:
-                email = candidate_email
-                break
-
-    # --- 3. PRIORITY 2: AGGRESSIVE RAW CONTENT SEARCH ---
-    if email == "Not Found":
-        # Aggressive decoding of HTML entities
-        decoded_page_content = page_content
-        try:
-            decoded_page_content = html.unescape(page_content)
-        except Exception:
-            pass
-
-            # Search the ENTIRE DECODED content for an exact email string
-        direct_email_match = re.search(email_pattern, decoded_page_content, re.IGNORECASE)
-        if direct_email_match:
-            email = direct_email_match.group(1).strip()
-
-    # E. Final Cleanup
-    if email != "Not Found":
-        email = email.rstrip(';\'" ')
-
-    # Removed Manual Search Query Generation logic
-
-    # Final return dictionary simplified
     return {
         "Name": event_name,
+        "Dates": dates,
+        "Tier": tier_label,
         "Tournament Director": tournament_director,
         "Email": email,
         "URL": url,
     }
 
 
-def clean_contact_name(raw_name_text):
-    """Strips the optional '#PDGA_NUMBER' suffix from a contact name and 'Email:' prefix."""
-    if not raw_name_text:
-        return "Not Found"
+def render_header() -> None:
+    logo_data_uri = get_logo_data_uri()
+    logo_markup = (
+        f'<div class="brand-logo-shell"><img src="{logo_data_uri}" alt="DGA logo" class="brand-logo-img" /></div>'
+        if logo_data_uri
+        else ""
+    )
 
-    # NEW: Remove "Email:" prefix if present (fixes "Email:Bill Fratzke")
-    if raw_name_text.lower().startswith("email:"):
-        raw_name_text = raw_name_text[len("email:"):].strip()
-
-    # This regex captures the name (group 1) and optionally ignores '#\d+' at the end.
-    raw_name_text = raw_name_text.strip()
-    name_match = re.match(r'(.+?)(?:\s*#\d+)?$', raw_name_text)
-    if name_match:
-        return name_match.group(1).strip()
-    return raw_name_text
-
-
-def scrape_course_detail(p: Playwright, course_name, url):
-    """
-    Course Scraper (MODIFIED: Cleaned up Contact Name and Phone formatting.
-    Removed Manual Search Query logic.)
-    """
-    try:
-        # --- SIMPLIFIED FOR STREAMLIT CLOUD AFTER 'playwright install' ---
-        browser = p.chromium.launch(
-            headless=True
-        )
-        # ---------------------------------------------
-        page = browser.new_page()
-
-        # Use a shorter, more reliable wait condition
-        page.goto(url, wait_until="networkidle")
-
-        # Small additional sleep to ensure any final JavaScript executes
-        time.sleep(1)
-
-        page_content = page.content()
-        browser.close()
-    except Exception as e:
-        # Removed "Manual Search Query" from return dict
-        return {"Course": course_name, "Contact Name": "ERROR", "Phone": "Request Failed",
-                "Email": f"Playwright/Request Failed: {e}", "URL": url}
-
-    soup = BeautifulSoup(page_content, 'html.parser')
-
-    contact_name = "Not Found"
-    phone = "Not Found"
-    alt_phone = "Not Found"
-    email = "Not Found"
-    email_pattern = r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
-    phone_pattern = r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
-
-    # --- 1. Targeted Search for Contact Name, Email, and Phone Number(s) (Drupal Classes) ---
-
-    # Target 1.1: Primary Name Field (via general field class)
-    contact_field_wrapper = soup.find('div', class_=re.compile(r'field--name-field-course-contact'))
-    if contact_field_wrapper:
-        contact_name_item = contact_field_wrapper.find('div', class_='field__item')
-        if contact_name_item:
-            raw_name_text = contact_name_item.get_text(strip=True)
-            contact_name = clean_contact_name(raw_name_text)
-
-    # Target 1.2: Primary Phone Number (via specific ID)
-    phone_field_wrapper = soup.find('div', class_='views-field-field-course-contact-home-phone-revision-id')
-    if phone_field_wrapper:
-        phone_item = phone_field_wrapper.find('span', class_='field-content')
-        if phone_item:
-            raw_phone_text = phone_item.get_text(strip=True)
-            phone_match = re.search(phone_pattern, raw_phone_text)
-            if phone_match:
-                phone = phone_match.group(0)
-
-    # Target 1.3: Alternative Phone Number (via work phone ID)
-    alt_phone_field_wrapper = soup.find('div', class_='views-field-field-course-contact-work-phone-revision-id')
-    if alt_phone_field_wrapper:
-        alt_phone_item = alt_phone_field_wrapper.find('span', class_='field-content')
-        if alt_phone_item:
-            raw_phone_text = alt_phone_item.get_text(strip=True)
-            phone_match = re.search(phone_pattern, raw_phone_text)
-            if phone_match:
-                alt_phone = phone_match.group(0)
-
-    # Target 1.4: Email/Contact Link (via email field ID)
-    email_field_wrapper = soup.find('div', class_='views-field-field-course-contact-email-revision-id')
-    provisional_contact_name = ""
-
-    if email_field_wrapper:
-
-        # FIX for Northside Park structure: grabs name from field text, e.g., 'Tom Jackson #4217'
-        contact_field_text = email_field_wrapper.get_text(strip=True)
-        if contact_field_text and contact_name in ["Not Found", ""]:
-            contact_name = clean_contact_name(contact_field_text)
-
-        # A. Check for direct MAILTO link first
-        direct_email_match = email_field_wrapper.find('a', href=re.compile(r'^mailto:'))
-        if direct_email_match:
-            email = direct_email_match['href'].replace('mailto:', '').strip()
-            provisional_contact_name = direct_email_match.get_text(strip=True)
-
-        # B. Check for Contact Form link
-        contact_form_link = email_field_wrapper.find('a', href=re.compile(r'^/course-contact\?course='))
-        if email == "Not Found" and contact_form_link:
-            email = "FORM: " + BASE_URL + contact_form_link['href']
-            provisional_contact_name = contact_form_link.get_text(strip=True)
-
-        # Use the anchor text as the Contact Name fallback if the main field was empty
-        if provisional_contact_name and contact_name in ["Not Found", ""]:
-            contact_name = clean_contact_name(provisional_contact_name)
-
-    # --- 2. Fallback Search for Simple Contact Block ---
-
-    contact_block_header = soup.find('h3', string=re.compile(r'Contact'))
-
-    # If we still haven't found a decent contact name, look immediately after the 'Contact' header
-    if contact_block_header and contact_name in ["Not Found", ""]:
-        name_tag = contact_block_header.find_next_sibling(text=True)
-        if name_tag:
-            name_text = name_tag.strip()
-            if name_text and len(name_text) > 3 and not name_text.lower().startswith('phone'):
-                contact_name = clean_contact_name(name_text)
-
-    # Now, check the general content container for email/phone
-    if contact_block_header:
-        parent_div = contact_block_header.find_parent('div')
-        if parent_div:
-            content_container = parent_div.find_next_sibling('div') or parent_div.find_next_sibling('p')
-
-            if content_container:
-                contact_block_content = content_container.get_text()
-
-                # Re-check for phone
-                alt_phone_match = re.search(r'(?:Alt\.\s*Phone|Phone|Contact):\s*(' + phone_pattern + r')',
-                                            contact_block_content)
-                if alt_phone_match:
-                    if phone == "Not Found":
-                        phone = alt_phone_match.group(1)
-                    elif alt_phone == "Not Found":
-                        alt_phone = alt_phone_match.group(1)
-
-                # Re-check for email link
-                if email == "Not Found" or email.startswith("FORM:"):
-                    email_link_tag = content_container.find('a', href=re.compile(r'^mailto:'))
-                    if email_link_tag:
-                        email = email_link_tag['href'].replace('mailto:', '').strip()
-                    else:
-                        contact_form_link = content_container.find('a', href=re.compile(r'^/course-contact\?course='))
-                        if contact_form_link and email == "Not Found":
-                            email = "FORM: " + BASE_URL + contact_form_link['href']
-
-    # --- 3. AGGRESSIVE PRIORITY: Full-page Raw Content Search ---
-    if not ('@' in email):
-        decoded_page_content = page_content
-        try:
-            decoded_page_content = html.unescape(page_content)
-        except Exception:
-            pass
-
-        if email == "Not Found" or email.startswith("FORM:"):
-            mailto_tags = soup.find_all('a', href=re.compile(r'^mailto:'))
-            if mailto_tags:
-                for tag in mailto_tags:
-                    candidate_email = tag['href'].replace('mailto:', '').strip()
-                    if candidate_email and '@' in candidate_email:
-                        email = candidate_email
-                        break
-
-        if email == "Not Found" or email.startswith("FORM:"):
-            direct_email_match = re.search(email_pattern, decoded_page_content, re.IGNORECASE)
-            if direct_email_match:
-                email = direct_email_match.group(1).strip()
-
-    # E. Final Cleanup
-    if email != "Not Found" and not email.startswith("FORM: "):
-        email = email.rstrip(';\'" ')
-
-    # --- 4. Combine Phone Results (MODIFIED: Removed 'Alt:' and 'Main:' prefixes) ---
-    final_phone_output = phone
-    if phone == "Not Found" and alt_phone != "Not Found":
-        final_phone_output = alt_phone
-    elif phone != "Not Found" and alt_phone != "Not Found":
-        # Keep phones separated by comma if both exist, without prefixes
-        final_phone_output = f"{phone}, {alt_phone}"
-
-    # If the combined output is still 'Not Found', replace with an empty string for cleaner display
-    if final_phone_output == "Not Found":
-        final_phone_output = ""
-
-    # Handle the case where the email/phone was found but name wasn't
-    if (email != "Not Found" or final_phone_output != "") and contact_name in ["Not Found", ""]:
-        contact_name = "Contact Info Found"
-
-    # Removed Manual Search Query Generation logic
-
-    # Final return dictionary simplified
-    return {
-        "Course": course_name,
-        "Contact Name": contact_name,
-        "Phone": final_phone_output,
-        "Email": email,
-        "URL": url,
-    }
+    st.markdown(
+        f"""
+<section class="brand-hero">
+  {logo_markup}
+  <div class="brand-text">
+    <h1>PDGA Event Contact Scraper</h1>
+    <p>Designed by CZ</p>
+  </div>
+</section>
+""",
+        unsafe_allow_html=True,
+    )
 
 
-# --- STREAMLIT APP LAYOUT (MODIFIED: Updated result_columns) ---
-
-st.set_page_config(layout="wide", page_title="PDGA Contact Scraper")
-st.title("PDGA Event & Course Contact Scraper (Playwright) 📧")
-st.markdown("""
-<style>
-.stAlert { border-radius: 0.5rem; }
-.stButton>button { border-radius: 0.5rem; background-color: #007bff; color: white; transition: all 0.2s; }
-.stButton>button:hover { background-color: #0056b3; transform: translateY(-2px); box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); }
-</style>
-""", unsafe_allow_html=True)
-
-# Define the scraping mode
-mode = st.radio(
-    "Select Scraper Mode:",
-    ("Tournament Scraper", "Course Scraper")
-)
-
-# Configuration based on mode
-if mode == "Tournament Scraper":
-    placeholder_url = "https://www.pdga.com/tour/search?date_filter%5Bmin%5D%5Bdate%5D=2025-10-09&date_filter%5Bmax%5D%5Bdate%5D=2026-10-09&State%5B%5D=CA&Tier%5B%5D=B"
-    column_to_parse = "Name"
-    scrape_detail_function = scrape_tournament_detail
-    # UPDATED: Removed "Manual Search Query"
-    result_columns = ["Name", "Tournament Director", "Email", "URL"]
-
-else:  # Course Scraper
-    placeholder_url = "https://www.pdga.com/course-directory/advanced?title=&field_course_location_country=US&field_course_location_locality=&field_course_location_administrative_area=CA&field_course_type_value=All&rating_value=All&field_course_holes_value=1-9&field_course_total_length_value=All&field_course_target_type_value=Mach2&field_course_tee_type_value=All&field_location_type_value=All&field_course_camping_value=yes&field_course_facilities_value=All&field_course_fees_value=All&field_course_handicap_value=All&field_course_private_value=All&field_course_signage_value=All&field_cart_friendly_value=All"
-    column_to_parse = "Course"
-    scrape_detail_function = scrape_course_detail
-    # UPDATED: Removed "Manual Search Query"
-    result_columns = ["Course", "Contact Name", "Phone", "Email", "URL"]
-
-# User Input
-input_url = st.text_input(
-    f"Paste the {mode} Search URL from PDGA:",
-    placeholder=placeholder_url
-)
-
-# Execute Scrape
-if st.button(f"Start {mode} Scrape 🎯 (Using Playwright)"):
-    if not input_url:
-        st.warning("Please enter a valid PDGA search URL to start.")
-        st.stop()
-
-    if not input_url.startswith(BASE_URL):
-        st.error(f"The URL must start with {BASE_URL}. Please use a valid PDGA link.")
-        st.stop()
-
+def run_scrape(
+    input_url: str,
+    column_to_parse: str,
+    result_columns: list[str],
+    tier_label: str,
+) -> None:
     st.header("Scraping Results")
 
-    # Wrap the entire scraping operation in the Playwright context
-    with sync_playwright() as p:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=PLAYWRIGHT_LAUNCH_ARGS)
+        try:
+            detail_links = get_detail_links(browser, input_url, column_to_parse, True)
+            if not detail_links:
+                st.error("No links were found to process. Please double-check your search URL.")
+                return
 
-        # 1. Get the list of detail links
-        detail_links = get_detail_links(p, input_url, column_to_parse)
-
-        if detail_links:
-            # Create a progress bar for the second stage
             progress_bar = st.progress(0)
-            all_results = []
+            all_results: list[dict[str, str]] = []
             total_links = len(detail_links)
+            detail_status = st.empty()
+            render_status_log(detail_status, "Detail Progress", ["Starting detail page scrape"])
 
-            # 2. Iterate and scrape each detail page
-            st.subheader("Step 2: Scraping Detail Pages...")
+            for index, item_data in enumerate(detail_links, start=1):
+                progress = index / total_links
+                item_name, link, dates = item_data
+                progress_bar.progress(progress, text=f"Processing {item_name} ({index}/{total_links}) - {dates}")
+                render_status_log(
+                    detail_status,
+                    "Detail Progress",
+                    [
+                        f"Processing `{item_name}`",
+                        f"Item {index} of {total_links}",
+                        f"Dates: {dates}",
+                    ],
+                )
+                result = scrape_tournament_detail(browser, item_name, link, dates, tier_label)
 
-            for i, (item_name, link) in enumerate(detail_links):
-                # Update progress bar
-                progress = (i + 1) / total_links
-                progress_bar.progress(progress, text=f"Processing {item_name} ({i + 1}/{total_links})")
-
-                # Scrape the detail page using the Playwright instance 'p'
-                result = scrape_detail_function(p, item_name, link)
                 all_results.append(result)
-
-                # Performance optimization: reduced wait time
                 time.sleep(0.1)
 
             progress_bar.progress(1.0, text="Scraping Complete!")
-            st.balloons()
+            render_status_log(
+                detail_status,
+                "Detail Progress",
+                [
+                    "Scrape complete",
+                    f"Processed {total_links} event(s)",
+                ],
+            )
 
-            # 3. Display and export results
-            final_df = pd.DataFrame(all_results)
-            # Select only the columns defined in result_columns for display/download
-            final_df = final_df[result_columns]
-
+            final_df = pd.DataFrame(all_results)[result_columns]
             st.subheader("Extracted Contact Information (Browser-Rendered)")
-            st.dataframe(final_df, use_container_width=True)
+            st.dataframe(final_df, width="stretch")
 
-            # Download button
-            csv = final_df.to_csv(index=False).encode('utf-8')
+            csv = final_df.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="Download Data as CSV",
                 data=csv,
-                file_name=f"{mode.lower().replace(' ', '_')}_contacts_playwright_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                file_name=f"tournament_scraper_contacts_playwright_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv",
             )
-        else:
-            st.error("No links were found to process. Please double-check your search URL.")
+        finally:
+            browser.close()
+
+
+def main() -> None:
+    render_header()
+    st.markdown(
+        """
+<style>
+[data-testid="stSidebar"] { display: none; }
+[data-testid="collapsedControl"] { display: none; }
+.block-container { padding-top: 1.5rem; max-width: 1400px; }
+.brand-hero {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+    padding: 1.25rem 1.5rem;
+    border: 1px solid rgba(66, 135, 245, 0.18);
+    border-radius: 24px;
+    background: linear-gradient(180deg, rgba(22,24,31,0.98), rgba(15,16,22,0.98));
+}
+.brand-logo-shell {
+    flex: 0 0 auto;
+    background: linear-gradient(135deg, rgba(255,255,255,0.97), rgba(239,243,249,0.94));
+    border-radius: 18px;
+    padding: 0.9rem 1rem;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+}
+.brand-logo-img {
+    display: block;
+    width: 280px;
+    height: auto;
+}
+.brand-text h1 {
+    margin: 0;
+    font-size: 2.2rem;
+    line-height: 1.1;
+}
+.brand-text p {
+    margin: 0.45rem 0 0;
+    color: rgba(250, 250, 250, 0.72);
+    font-size: 0.98rem;
+}
+.stSelectbox label, .stTextInput label {
+    font-weight: 600;
+}
+.stButton>button { border-radius: 0.5rem; transition: all 0.2s; }
+.stButton>button:hover { transform: translateY(-2px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+@media (max-width: 900px) {
+    .brand-hero {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    .brand-logo-img {
+        width: 220px;
+    }
+}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+    placeholder_url = (
+        "https://www.pdga.com/tour/search?"
+        "date_filter%5Bmin%5D%5Bdate%5D=2025-10-09&"
+        "date_filter%5Bmax%5D%5Bdate%5D=2026-10-09&"
+        "State%5B%5D=CA&Tier%5B%5D=B"
+    )
+    column_to_parse = "Name"
+    result_columns = ["Name", "Dates", "Tier", "Tournament Director", "Email", "URL"]
+    tier_label = st.selectbox(
+        "Select Tier Label for CSV Column:",
+        options=["A-Tier", "B-Tier", "C-Tier", "Major", "NT", "Other"],
+        help="This value will populate the 'Tier' column for all scraped entries.",
+    )
+
+    input_url = st.text_input(
+        "Paste the Tournament Scraper Search URL from PDGA:",
+        placeholder=placeholder_url,
+    )
+
+    if st.button("Start Tournament Scrape 🎯 (Using Playwright)"):
+        if not input_url:
+            st.warning("Please enter a valid PDGA search URL to start.")
+            st.stop()
+
+        if not input_url.startswith(BASE_URL):
+            st.error(f"The URL must start with {BASE_URL}. Please use a valid PDGA link.")
+            st.stop()
+
+        run_scrape(
+            input_url=input_url,
+            column_to_parse=column_to_parse,
+            result_columns=result_columns,
+            tier_label=tier_label,
+        )
+
+
+if __name__ == "__main__":
+    main()
