@@ -1,14 +1,12 @@
 import html
-import os
 import re
-import subprocess
-import sys
 import time
 import base64
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
@@ -29,95 +27,16 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-IS_LINUX = sys.platform.startswith("linux")
-IS_DARWIN = sys.platform.startswith("darwin")
-IS_WINDOWS = os.name == "nt"
-
 BASE_URL = "https://www.pdga.com"
-DEFAULT_MS_PATH = Path.home() / ".cache" / "ms-playwright"
-PLAYWRIGHT_LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"] if IS_LINUX else []
-PLAYWRIGHT_CHANNEL = "chromium"
+REQUEST_TIMEOUT = 30
+REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+    )
+}
 EMAIL_PATTERN = r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
 NOT_FOUND = "Not Found"
-
-
-def _list_ms_cache_tree(base: Path) -> str:
-    """Return a simple directory summary for the Playwright cache."""
-    try:
-        if not base.exists():
-            return "<cache dir not created>"
-
-        lines: list[str] = []
-        for revision in sorted(base.iterdir()):
-            if not revision.is_dir():
-                continue
-            chrome_dir = revision / "chrome-linux"
-            has_chrome = (chrome_dir / "chrome").exists()
-            has_shell = (chrome_dir / "headless_shell").exists()
-            lines.append(f"{revision.name}/chrome-linux -> chrome:{has_chrome} headless_shell:{has_shell}")
-        return "\n".join(lines) if lines else "<empty>"
-    except Exception as exc:
-        return f"<error listing cache: {exc}>"
-
-
-def _chromium_present(base: Path) -> bool:
-    """Return True when a runnable Chromium binary is already present."""
-    try:
-        if not base.exists():
-            return False
-
-        for revision in base.iterdir():
-            if not revision.is_dir():
-                continue
-            if not revision.name.startswith("chromium"):
-                continue
-
-            chrome_dir = revision / "chrome-linux"
-            if chrome_dir.exists() and (chrome_dir / "chrome").exists():
-                return True
-    except Exception:
-        return False
-
-    return False
-
-
-def ensure_playwright_browsers_linux() -> None:
-    """Install Chromium on Linux if the default Playwright cache is empty."""
-    if not IS_LINUX:
-        return
-
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(DEFAULT_MS_PATH)
-    DEFAULT_MS_PATH.mkdir(parents=True, exist_ok=True)
-
-    if _chromium_present(DEFAULT_MS_PATH):
-        return
-
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        print("Playwright install reported an error. The app will still try to launch.")
-        if exc.stdout:
-            print(exc.stdout)
-        if exc.stderr:
-            print(exc.stderr)
-
-
-ensure_playwright_browsers_linux()
-
-from playwright.sync_api import Browser, sync_playwright
-
-
-def platform_label() -> str:
-    if IS_DARWIN:
-        return "macOS"
-    if IS_WINDOWS:
-        return "Windows"
-    return sys.platform
 
 
 def decode_html(text: str) -> str:
@@ -155,25 +74,14 @@ def render_status_log(container, title: str, lines: list[str]) -> None:
 
 
 def fetch_page_content(
-    browser: Browser,
     url: str,
     *,
-    wait_until: str = "domcontentloaded",
-    selector: Optional[str] = None,
-    timeout: int = 30000,
-    settle_seconds: float = 0,
+    timeout: int = REQUEST_TIMEOUT,
 ) -> str:
-    """Open a page, wait for the relevant DOM, then return the rendered HTML."""
-    page = browser.new_page()
-    try:
-        page.goto(url, wait_until=wait_until)
-        if selector:
-            page.wait_for_selector(selector, timeout=timeout)
-        if settle_seconds:
-            time.sleep(settle_seconds)
-        return page.content()
-    finally:
-        page.close()
+    """Fetch a server-rendered page and return the HTML."""
+    response = requests.get(url, headers=REQUEST_HEADERS, timeout=timeout)
+    response.raise_for_status()
+    return response.text
 
 
 def extract_first_email(soup: BeautifulSoup, page_content: str) -> str:
@@ -253,7 +161,7 @@ def scrape_page_links(page_content: str, column_name: str, is_tournament_mode: b
     return all_links, next_url, resolved_column
 
 
-def get_detail_links(browser: Browser, search_url: str, column_name: str, is_tournament_mode: bool) -> list[tuple]:
+def get_detail_links(search_url: str, column_name: str, is_tournament_mode: bool) -> list[tuple]:
     """Walk the paginated result set and collect all detail page links."""
     status_box = st.empty()
     status_lines = [f"Loading index pages from `{search_url}`"]
@@ -270,13 +178,7 @@ def get_detail_links(browser: Browser, search_url: str, column_name: str, is_tou
             status_lines.append(f"Processing results page {page_count}")
             render_status_log(status_box, "Index Progress", status_lines)
 
-            page_content = fetch_page_content(
-                browser,
-                current_url,
-                wait_until="domcontentloaded",
-                selector="table.views-table",
-                timeout=15000,
-            )
+            page_content = fetch_page_content(current_url, timeout=15)
             new_links, next_url, resolved_column = scrape_page_links(page_content, column_name, is_tournament_mode)
             final_target_column = resolved_column
             detail_links.extend(new_links)
@@ -299,7 +201,6 @@ def get_detail_links(browser: Browser, search_url: str, column_name: str, is_tou
 
 
 def scrape_tournament_detail(
-    browser: Browser,
     event_name: str,
     url: str,
     dates: str,
@@ -307,19 +208,14 @@ def scrape_tournament_detail(
 ) -> dict[str, str]:
     """Scrape tournament contact details from the event page."""
     try:
-        page_content = fetch_page_content(
-            browser,
-            url,
-            wait_until="domcontentloaded",
-            selector='a[href*="/general-contact?pdganum="]',
-        )
+        page_content = fetch_page_content(url)
     except Exception as exc:
         return {
             "Name": event_name,
             "Dates": dates,
             "Tier": tier_label,
             "Tournament Director": "ERROR",
-            "Email": f"Playwright/Request Failed: {exc}",
+            "Email": f"Request Failed: {exc}",
             "URL": url,
         }
 
@@ -367,66 +263,56 @@ def run_scrape(
     tier_label: str,
 ) -> None:
     st.header("Scraping Results")
+    detail_links = get_detail_links(input_url, column_to_parse, True)
+    if not detail_links:
+        st.error("No links were found to process. Please double-check your search URL.")
+        return
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=True,
-            channel=PLAYWRIGHT_CHANNEL,
-            args=PLAYWRIGHT_LAUNCH_ARGS,
+    progress_bar = st.progress(0)
+    all_results: list[dict[str, str]] = []
+    total_links = len(detail_links)
+    detail_status = st.empty()
+    render_status_log(detail_status, "Detail Progress", ["Starting detail page scrape"])
+
+    for index, item_data in enumerate(detail_links, start=1):
+        progress = index / total_links
+        item_name, link, dates = item_data
+        progress_bar.progress(progress, text=f"Processing {item_name} ({index}/{total_links}) - {dates}")
+        render_status_log(
+            detail_status,
+            "Detail Progress",
+            [
+                f"Processing `{item_name}`",
+                f"Item {index} of {total_links}",
+                f"Dates: {dates}",
+            ],
         )
-        try:
-            detail_links = get_detail_links(browser, input_url, column_to_parse, True)
-            if not detail_links:
-                st.error("No links were found to process. Please double-check your search URL.")
-                return
+        result = scrape_tournament_detail(item_name, link, dates, tier_label)
 
-            progress_bar = st.progress(0)
-            all_results: list[dict[str, str]] = []
-            total_links = len(detail_links)
-            detail_status = st.empty()
-            render_status_log(detail_status, "Detail Progress", ["Starting detail page scrape"])
+        all_results.append(result)
+        time.sleep(0.1)
 
-            for index, item_data in enumerate(detail_links, start=1):
-                progress = index / total_links
-                item_name, link, dates = item_data
-                progress_bar.progress(progress, text=f"Processing {item_name} ({index}/{total_links}) - {dates}")
-                render_status_log(
-                    detail_status,
-                    "Detail Progress",
-                    [
-                        f"Processing `{item_name}`",
-                        f"Item {index} of {total_links}",
-                        f"Dates: {dates}",
-                    ],
-                )
-                result = scrape_tournament_detail(browser, item_name, link, dates, tier_label)
+    progress_bar.progress(1.0, text="Scraping Complete!")
+    render_status_log(
+        detail_status,
+        "Detail Progress",
+        [
+            "Scrape complete",
+            f"Processed {total_links} event(s)",
+        ],
+    )
 
-                all_results.append(result)
-                time.sleep(0.1)
+    final_df = pd.DataFrame(all_results)[result_columns]
+    st.subheader("Extracted Contact Information")
+    st.dataframe(final_df, width="stretch")
 
-            progress_bar.progress(1.0, text="Scraping Complete!")
-            render_status_log(
-                detail_status,
-                "Detail Progress",
-                [
-                    "Scrape complete",
-                    f"Processed {total_links} event(s)",
-                ],
-            )
-
-            final_df = pd.DataFrame(all_results)[result_columns]
-            st.subheader("Extracted Contact Information (Browser-Rendered)")
-            st.dataframe(final_df, width="stretch")
-
-            csv = final_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Download Data as CSV",
-                data=csv,
-                file_name=f"tournament_scraper_contacts_playwright_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv",
-            )
-        finally:
-            browser.close()
+    csv = final_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="Download Data as CSV",
+        data=csv,
+        file_name=f"tournament_scraper_contacts_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+    )
 
 
 def main() -> None:
@@ -507,7 +393,7 @@ def main() -> None:
         placeholder=placeholder_url,
     )
 
-    if st.button("Start Tournament Scrape 🎯 (Using Playwright)"):
+    if st.button("Start Tournament Scrape 🎯"):
         if not input_url:
             st.warning("Please enter a valid PDGA search URL to start.")
             st.stop()
