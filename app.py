@@ -92,7 +92,6 @@ def ensure_playwright_browsers_linux() -> None:
         return
 
     try:
-        st.info("Playwright: installing browsers into default cache (first run only)...")
         subprocess.run(
             [sys.executable, "-m", "playwright", "install"],
             check=True,
@@ -100,14 +99,11 @@ def ensure_playwright_browsers_linux() -> None:
             text=True,
         )
     except subprocess.CalledProcessError as exc:
-        st.warning("Playwright install reported an error. The app will still try to launch.")
+        print("Playwright install reported an error. The app will still try to launch.")
         if exc.stdout:
-            st.code(exc.stdout, language="bash")
+            print(exc.stdout)
         if exc.stderr:
-            st.code(exc.stderr, language="bash")
-
-    st.caption("Playwright cache contents after install attempt:")
-    st.code(_list_ms_cache_tree(DEFAULT_MS_PATH))
+            print(exc.stderr)
 
 
 ensure_playwright_browsers_linux()
