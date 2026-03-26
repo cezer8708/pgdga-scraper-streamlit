@@ -1,6 +1,7 @@
 import html
 import re
 import time
+import random
 import base64
 from pathlib import Path
 from typing import Optional
@@ -9,6 +10,8 @@ import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 APP_DIR = Path(__file__).resolve().parent
 LOGO_CANDIDATES = [
@@ -29,6 +32,11 @@ st.set_page_config(
 
 BASE_URL = "https://www.pdga.com"
 REQUEST_TIMEOUT = 30
+REQUEST_RETRY_COUNT = 4
+REQUEST_MIN_DELAY = 0.45
+REQUEST_MAX_DELAY = 1.1
+REQUEST_BATCH_SIZE = 25
+REQUEST_BATCH_PAUSE_SECONDS = 4
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -89,15 +97,53 @@ def render_status_log(container, title: str, lines: list[str]) -> None:
     container.markdown(f"**{title}**\n\n{body}")
 
 
+def create_http_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=REQUEST_RETRY_COUNT,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update(REQUEST_HEADERS)
+    return session
+
+
+def sleep_with_jitter(min_seconds: float = REQUEST_MIN_DELAY, max_seconds: float = REQUEST_MAX_DELAY) -> None:
+    time.sleep(random.uniform(min_seconds, max_seconds))
+
+
 def fetch_page_content(
+    session: requests.Session,
     url: str,
     *,
     timeout: int = REQUEST_TIMEOUT,
 ) -> str:
     """Fetch a server-rendered page and return the HTML."""
-    response = requests.get(url, headers=REQUEST_HEADERS, timeout=timeout)
-    response.raise_for_status()
-    return response.text
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, REQUEST_RETRY_COUNT + 2):
+        try:
+            response = session.get(url, timeout=timeout)
+            if response.status_code == 429 and attempt <= REQUEST_RETRY_COUNT:
+                retry_after = response.headers.get("Retry-After")
+                delay_seconds = float(retry_after) if retry_after and retry_after.isdigit() else (attempt * 3)
+                time.sleep(delay_seconds + random.uniform(0.25, 0.75))
+                continue
+
+            response.raise_for_status()
+            return response.text
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt > REQUEST_RETRY_COUNT:
+                break
+            time.sleep((attempt * 2) + random.uniform(0.25, 0.75))
+
+    raise last_error if last_error else RuntimeError(f"Request failed for {url}")
 
 
 def extract_first_email(soup: BeautifulSoup, page_content: str) -> str:
@@ -183,7 +229,7 @@ def scrape_page_links(page_content: str, column_name: str, is_tournament_mode: b
     return all_links, next_url, resolved_column
 
 
-def get_detail_links(search_url: str, column_name: str, is_tournament_mode: bool) -> list[tuple]:
+def get_detail_links(session: requests.Session, search_url: str, column_name: str, is_tournament_mode: bool) -> list[tuple]:
     """Walk the paginated result set and collect all detail page links."""
     status_box = st.empty()
     status_lines = [f"Loading index pages from `{search_url}`"]
@@ -200,7 +246,7 @@ def get_detail_links(search_url: str, column_name: str, is_tournament_mode: bool
             status_lines.append(f"Processing results page {page_count}")
             render_status_log(status_box, "Index Progress", status_lines)
 
-            page_content = fetch_page_content(current_url, timeout=15)
+            page_content = fetch_page_content(session, current_url, timeout=15)
             new_links, next_url, resolved_column = scrape_page_links(page_content, column_name, is_tournament_mode)
             final_target_column = resolved_column
             detail_links.extend(new_links)
@@ -209,6 +255,7 @@ def get_detail_links(search_url: str, column_name: str, is_tournament_mode: bool
                 status_lines.append(f"Found {len(new_links)} events on page {page_count}")
                 render_status_log(status_box, "Index Progress", status_lines)
 
+            sleep_with_jitter(0.6, 1.4)
             current_url = next_url if next_url and next_url != current_url else None
 
         status_lines.append(f"Finished pagination after {page_count} page(s)")
@@ -223,6 +270,7 @@ def get_detail_links(search_url: str, column_name: str, is_tournament_mode: bool
 
 
 def scrape_tournament_detail(
+    session: requests.Session,
     event_name: str,
     url: str,
     dates: str,
@@ -230,7 +278,7 @@ def scrape_tournament_detail(
 ) -> dict[str, str]:
     """Scrape tournament contact details from the event page."""
     try:
-        page_content = fetch_page_content(url)
+        page_content = fetch_page_content(session, url)
     except Exception as exc:
         return {
             "Name": event_name,
@@ -285,7 +333,8 @@ def run_scrape(
     tier_label: str,
 ) -> None:
     st.header("Scraping Results")
-    detail_links = get_detail_links(input_url, column_to_parse, True)
+    session = create_http_session()
+    detail_links = get_detail_links(session, input_url, column_to_parse, True)
     if not detail_links:
         st.error("No links were found to process. Please double-check your search URL.")
         return
@@ -309,10 +358,16 @@ def run_scrape(
                 f"Dates: {dates}",
             ],
         )
-        result = scrape_tournament_detail(item_name, link, dates, tier_label)
+        result = scrape_tournament_detail(session, item_name, link, dates, tier_label)
 
         all_results.append(result)
-        time.sleep(0.1)
+        if index % REQUEST_BATCH_SIZE == 0 and index < total_links:
+            detail_status.markdown(
+                f"**Detail Progress**\n\n- Processed {index} event(s)\n- Cooling down briefly to avoid PDGA rate limits"
+            )
+            time.sleep(REQUEST_BATCH_PAUSE_SECONDS)
+        else:
+            sleep_with_jitter()
 
     progress_bar.progress(1.0, text="Scraping Complete!")
     render_status_log(
