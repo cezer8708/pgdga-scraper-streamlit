@@ -114,11 +114,12 @@ def render_progress_panel(
         for label, value in stats
     )
     note_markup = f'<p class="run-panel-note">{note}</p>' if note else ""
+    stats_style = f'style="grid-template-columns: repeat({max(len(stats), 1)}, minmax(0, 1fr));"'
     container.markdown(
         f"""
         <div class="run-panel">
           <div class="run-panel-header">{title}</div>
-          <div class="run-stats-grid">{stats_markup}</div>
+          <div class="run-stats-grid" {stats_style}>{stats_markup}</div>
           <div class="run-panel-status">{status}</div>
           {note_markup}
         </div>
@@ -273,7 +274,6 @@ def get_detail_links(session: requests.Session, search_url: str, column_name: st
         [
             ("Pages scanned", "0"),
             ("Events found", "0"),
-            ("Target column", column_name),
         ],
         "Opening PDGA search results",
         "Preparing event links for contact scraping.",
@@ -288,7 +288,6 @@ def get_detail_links(session: requests.Session, search_url: str, column_name: st
                 [
                     ("Pages scanned", str(page_count - 1)),
                     ("Events found", str(len(detail_links))),
-                    ("Target column", final_target_column),
                 ],
                 f"Scanning results page {page_count}",
                 "Collecting event detail links from the PDGA search results.",
@@ -305,7 +304,6 @@ def get_detail_links(session: requests.Session, search_url: str, column_name: st
                 [
                     ("Pages scanned", str(page_count)),
                     ("Events found", str(len(detail_links))),
-                    ("Target column", final_target_column),
                 ],
                 f"Page {page_count} captured",
                 f"Added {last_page_count} event link(s) from the current page.",
@@ -320,7 +318,6 @@ def get_detail_links(session: requests.Session, search_url: str, column_name: st
             [
                 ("Pages scanned", str(page_count)),
                 ("Events found", str(len(detail_links))),
-                ("Target column", final_target_column),
             ],
             "Search pages loaded",
             f"Finished scanning {page_count} result page(s).",
@@ -334,7 +331,6 @@ def get_detail_links(session: requests.Session, search_url: str, column_name: st
         [
             ("Pages scanned", str(page_count)),
             ("Events found", str(len(detail_links))),
-            ("Target column", final_target_column),
         ],
         "Event queue ready",
         f"{len(detail_links)} detail page(s) queued for scraping.",
