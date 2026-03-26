@@ -15,6 +15,8 @@ from urllib3.util.retry import Retry
 
 APP_DIR = Path(__file__).resolve().parent
 LOGO_CANDIDATES = [
+    APP_DIR / "assets" / "dga_logo_white.png",
+    APP_DIR / "assets" / "dga-logo-white.png",
     Path("/Users/cesarzermeno/Desktop/Back Ups/Custom_Stamp_Tool/dga-logo.png"),
     APP_DIR / "dga_logo.png",
     APP_DIR / "dga-logo.png",
@@ -376,7 +378,7 @@ def scrape_tournament_detail(
 def render_header() -> None:
     logo_data_uri = get_logo_data_uri()
     logo_markup = (
-        f'<div class="brand-logo-shell"><img src="{logo_data_uri}" alt="DGA logo" class="brand-logo-img" /></div>'
+        f'<img src="{logo_data_uri}" alt="DGA logo" class="brand-logo-img" />'
         if logo_data_uri
         else ""
     )
@@ -505,17 +507,11 @@ def main() -> None:
     border-radius: 24px;
     background: linear-gradient(180deg, rgba(22,24,31,0.98), rgba(15,16,22,0.98));
 }
-.brand-logo-shell {
-    flex: 0 0 auto;
-    background: linear-gradient(135deg, rgba(255,255,255,0.97), rgba(239,243,249,0.94));
-    border-radius: 18px;
-    padding: 0.9rem 1rem;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
-}
 .brand-logo-img {
     display: block;
-    width: 280px;
+    width: 260px;
     height: auto;
+    flex: 0 0 auto;
 }
 .brand-text h1 {
     margin: 0;
