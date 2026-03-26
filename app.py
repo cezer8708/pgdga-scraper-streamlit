@@ -52,6 +52,22 @@ def sanitize_email(value: str) -> str:
     return value
 
 
+def decode_cloudflare_email(encoded: str) -> str:
+    """Decode Cloudflare's email protection hex payload."""
+    if not encoded:
+        return NOT_FOUND
+
+    try:
+        key = int(encoded[:2], 16)
+        decoded_chars = [
+            chr(int(encoded[index:index + 2], 16) ^ key)
+            for index in range(2, len(encoded), 2)
+        ]
+        return sanitize_email("".join(decoded_chars))
+    except Exception:
+        return NOT_FOUND
+
+
 def get_logo_path() -> Optional[Path]:
     for candidate in LOGO_CANDIDATES:
         if candidate.exists():
@@ -86,6 +102,12 @@ def fetch_page_content(
 
 def extract_first_email(soup: BeautifulSoup, page_content: str) -> str:
     """Return the first mailto email or a raw email match from the page."""
+    protected_email = soup.find("span", class_="__cf_email__", attrs={"data-cfemail": True})
+    if protected_email:
+        decoded_email = decode_cloudflare_email(protected_email["data-cfemail"])
+        if decoded_email != NOT_FOUND:
+            return decoded_email
+
     for tag in soup.find_all("a", href=re.compile(r"^mailto:")):
         candidate = tag["href"].replace("mailto:", "").strip()
         if "@" in candidate:
