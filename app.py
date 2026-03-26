@@ -97,6 +97,36 @@ def render_status_log(container, title: str, lines: list[str]) -> None:
     container.markdown(f"**{title}**\n\n{body}")
 
 
+def render_progress_panel(
+    container,
+    title: str,
+    stats: list[tuple[str, str]],
+    status: str,
+    note: Optional[str] = None,
+) -> None:
+    stats_markup = "".join(
+        f"""
+        <div class="run-stat-card">
+          <span>{label}</span>
+          <strong>{value}</strong>
+        </div>
+        """
+        for label, value in stats
+    )
+    note_markup = f'<p class="run-panel-note">{note}</p>' if note else ""
+    container.markdown(
+        f"""
+        <div class="run-panel">
+          <div class="run-panel-header">{title}</div>
+          <div class="run-stats-grid">{stats_markup}</div>
+          <div class="run-panel-status">{status}</div>
+          {note_markup}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def create_http_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
@@ -232,40 +262,83 @@ def scrape_page_links(page_content: str, column_name: str, is_tournament_mode: b
 def get_detail_links(session: requests.Session, search_url: str, column_name: str, is_tournament_mode: bool) -> list[tuple]:
     """Walk the paginated result set and collect all detail page links."""
     status_box = st.empty()
-    status_lines = [f"Loading index pages from `{search_url}`"]
-    render_status_log(status_box, "Index Progress", status_lines)
-
     detail_links: list[tuple] = []
     page_count = 0
     current_url = search_url
     final_target_column = column_name
+    last_page_count = 0
+    render_progress_panel(
+        status_box,
+        "Search Progress",
+        [
+            ("Pages scanned", "0"),
+            ("Events found", "0"),
+            ("Target column", column_name),
+        ],
+        "Opening PDGA search results",
+        "Preparing event links for contact scraping.",
+    )
 
     try:
         while current_url:
             page_count += 1
-            status_lines.append(f"Processing results page {page_count}")
-            render_status_log(status_box, "Index Progress", status_lines)
+            render_progress_panel(
+                status_box,
+                "Search Progress",
+                [
+                    ("Pages scanned", str(page_count - 1)),
+                    ("Events found", str(len(detail_links))),
+                    ("Target column", final_target_column),
+                ],
+                f"Scanning results page {page_count}",
+                "Collecting event detail links from the PDGA search results.",
+            )
 
             page_content = fetch_page_content(session, current_url, timeout=15)
             new_links, next_url, resolved_column = scrape_page_links(page_content, column_name, is_tournament_mode)
             final_target_column = resolved_column
             detail_links.extend(new_links)
-
-            if new_links:
-                status_lines.append(f"Found {len(new_links)} events on page {page_count}")
-                render_status_log(status_box, "Index Progress", status_lines)
+            last_page_count = len(new_links)
+            render_progress_panel(
+                status_box,
+                "Search Progress",
+                [
+                    ("Pages scanned", str(page_count)),
+                    ("Events found", str(len(detail_links))),
+                    ("Target column", final_target_column),
+                ],
+                f"Page {page_count} captured",
+                f"Added {last_page_count} event link(s) from the current page.",
+            )
 
             sleep_with_jitter(0.6, 1.4)
             current_url = next_url if next_url and next_url != current_url else None
 
-        status_lines.append(f"Finished pagination after {page_count} page(s)")
+        render_progress_panel(
+            status_box,
+            "Search Progress",
+            [
+                ("Pages scanned", str(page_count)),
+                ("Events found", str(len(detail_links))),
+                ("Target column", final_target_column),
+            ],
+            "Search pages loaded",
+            f"Finished scanning {page_count} result page(s).",
+        )
     except Exception as exc:
         st.error(f"An error occurred during pagination on page {page_count}. Stopping. Error: {exc}")
 
-    status_lines.append(
-        f"Collected {len(detail_links)} detail page(s) using column `{final_target_column}`"
+    render_progress_panel(
+        status_box,
+        "Search Progress",
+        [
+            ("Pages scanned", str(page_count)),
+            ("Events found", str(len(detail_links))),
+            ("Target column", final_target_column),
+        ],
+        "Event queue ready",
+        f"{len(detail_links)} detail page(s) queued for scraping.",
     )
-    render_status_log(status_box, "Index Progress", status_lines)
     return detail_links
 
 
@@ -343,40 +416,66 @@ def run_scrape(
     all_results: list[dict[str, str]] = []
     total_links = len(detail_links)
     detail_status = st.empty()
-    render_status_log(detail_status, "Detail Progress", ["Starting detail page scrape"])
+    render_progress_panel(
+        detail_status,
+        "Scrape Progress",
+        [
+            ("Queued", str(total_links)),
+            ("Processed", "0"),
+            ("Errors", "0"),
+        ],
+        "Starting contact lookup",
+        "Opening event pages and pulling tournament director details.",
+    )
 
     for index, item_data in enumerate(detail_links, start=1):
         progress = index / total_links
         item_name, link, dates = item_data
-        progress_bar.progress(progress, text=f"Processing {item_name} ({index}/{total_links}) - {dates}")
-        render_status_log(
+        progress_bar.progress(progress, text=f"Scraping event contacts {index}/{total_links}")
+        error_count = sum(1 for row in all_results if row.get("Tournament Director") == "ERROR")
+        render_progress_panel(
             detail_status,
-            "Detail Progress",
+            "Scrape Progress",
             [
-                f"Processing `{item_name}`",
-                f"Item {index} of {total_links}",
-                f"Dates: {dates}",
+                ("Queued", str(total_links)),
+                ("Processed", str(index - 1)),
+                ("Errors", str(error_count)),
             ],
+            f"Currently checking: {item_name}",
+            f"{dates}" if dates else None,
         )
         result = scrape_tournament_detail(session, item_name, link, dates, tier_label)
 
         all_results.append(result)
         if index % REQUEST_BATCH_SIZE == 0 and index < total_links:
-            detail_status.markdown(
-                f"**Detail Progress**\n\n- Processed {index} event(s)\n- Cooling down briefly to avoid PDGA rate limits"
+            error_count = sum(1 for row in all_results if row.get("Tournament Director") == "ERROR")
+            render_progress_panel(
+                detail_status,
+                "Scrape Progress",
+                [
+                    ("Queued", str(total_links)),
+                    ("Processed", str(index)),
+                    ("Errors", str(error_count)),
+                ],
+                "Cooling down to avoid PDGA rate limits",
+                "Taking a short pause before opening the next batch of event pages.",
             )
             time.sleep(REQUEST_BATCH_PAUSE_SECONDS)
         else:
             sleep_with_jitter()
 
-    progress_bar.progress(1.0, text="Scraping Complete!")
-    render_status_log(
+    final_error_count = sum(1 for row in all_results if row.get("Tournament Director") == "ERROR")
+    progress_bar.progress(1.0, text="Scrape complete")
+    render_progress_panel(
         detail_status,
-        "Detail Progress",
+        "Scrape Progress",
         [
-            "Scrape complete",
-            f"Processed {total_links} event(s)",
+            ("Queued", str(total_links)),
+            ("Processed", str(total_links)),
+            ("Errors", str(final_error_count)),
         ],
+        "Contact scrape complete",
+        "Review the table below or export the CSV.",
     )
 
     final_df = pd.DataFrame(all_results)[result_columns]
@@ -432,6 +531,57 @@ def main() -> None:
     color: rgba(250, 250, 250, 0.72);
     font-size: 0.98rem;
 }
+.run-panel {
+    margin: 0.6rem 0 1rem;
+    padding: 1rem 1.05rem;
+    border: 1px solid rgba(66, 135, 245, 0.14);
+    border-radius: 18px;
+    background: linear-gradient(180deg, rgba(22,24,31,0.96), rgba(16,18,24,0.96));
+}
+.run-panel-header {
+    font-size: 0.84rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: rgba(250, 250, 250, 0.62);
+    margin-bottom: 0.85rem;
+}
+.run-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 0.85rem;
+}
+.run-stat-card {
+    padding: 0.7rem 0.8rem;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.run-stat-card span {
+    display: block;
+    font-size: 0.76rem;
+    color: rgba(250, 250, 250, 0.58);
+    margin-bottom: 0.25rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.run-stat-card strong {
+    display: block;
+    font-size: 1.1rem;
+    line-height: 1.1;
+    color: #f9fafb;
+}
+.run-panel-status {
+    font-size: 0.98rem;
+    font-weight: 600;
+    color: #f9fafb;
+}
+.run-panel-note {
+    margin: 0.35rem 0 0;
+    font-size: 0.88rem;
+    color: rgba(250, 250, 250, 0.66);
+}
 .stSelectbox label, .stTextInput label {
     font-weight: 600;
 }
@@ -444,6 +594,9 @@ def main() -> None:
     }
     .brand-logo-img {
         width: 220px;
+    }
+    .run-stats-grid {
+        grid-template-columns: 1fr;
     }
 }
 </style>
