@@ -33,6 +33,7 @@ st.set_page_config(
 )
 
 BASE_URL = "https://www.pdga.com"
+IT_HELP_URL = "https://it-tickets-jigv.onrender.com"
 REQUEST_TIMEOUT = 30
 REQUEST_RETRY_COUNT = 4
 REQUEST_MIN_DELAY = 0.45
@@ -390,6 +391,7 @@ def render_header() -> None:
   <div class="brand-text">
     <h1>PDGA Event Contact Scraper</h1>
     <p>Designed by CZ</p>
+    <a class="brand-help-link" href="{IT_HELP_URL}" target="_blank" rel="noopener noreferrer">Help</a>
   </div>
 </section>
 """,
@@ -529,6 +531,25 @@ def main() -> None:
     margin: 0.1rem 0 0;
     color: rgba(250, 250, 250, 0.72);
     font-size: 0.98rem;
+}
+.brand-help-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 0.75rem;
+    padding: 0.42rem 0.9rem;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.04);
+    color: #f9fafb;
+    font-size: 0.88rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: all 0.2s ease;
+}
+.brand-help-link:hover {
+    border-color: rgba(255, 255, 255, 0.28);
+    background: rgba(255, 255, 255, 0.08);
 }
 .run-panel {
     margin: 0.6rem 0 1rem;
