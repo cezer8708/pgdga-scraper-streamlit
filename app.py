@@ -391,7 +391,18 @@ def render_header() -> None:
   <div class="brand-text">
     <h1>PDGA Event Contact Scraper</h1>
     <p>Designed by CZ</p>
-    <a class="brand-help-link" href="{IT_HELP_URL}" target="_blank" rel="noopener noreferrer">Help</a>
+    <a class="brand-help-link" href="{IT_HELP_URL}" target="_blank" rel="noopener noreferrer">Submit IT Ticket</a>
+    <details class="brand-help-guide">
+      <summary>How to Use</summary>
+      <ol>
+        <li>Go to `pdga.com`.</li>
+        <li>Open `Events` and choose `Advanced Search`.</li>
+        <li>Filter for the events you want, then run the search.</li>
+        <li>Copy the search-results URL and paste it into this scraper.</li>
+        <li>Export the CSV when the scrape finishes.</li>
+        <li>Upload the CSV into Pipedrive.</li>
+      </ol>
+    </details>
   </div>
 </section>
 """,
@@ -550,6 +561,31 @@ def main() -> None:
 .brand-help-link:hover {
     border-color: rgba(255, 255, 255, 0.28);
     background: rgba(255, 255, 255, 0.08);
+}
+.brand-help-guide {
+    width: min(100%, 520px);
+    margin: 0.8rem auto 0;
+    padding: 0.7rem 0.9rem;
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+    text-align: left;
+}
+.brand-help-guide summary {
+    cursor: pointer;
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: #f9fafb;
+}
+.brand-help-guide ol {
+    margin: 0.75rem 0 0 1.15rem;
+    padding: 0;
+    color: rgba(250, 250, 250, 0.78);
+    font-size: 0.88rem;
+    line-height: 1.5;
+}
+.brand-help-guide li + li {
+    margin-top: 0.3rem;
 }
 .run-panel {
     margin: 0.6rem 0 1rem;
