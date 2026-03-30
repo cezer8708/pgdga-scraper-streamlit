@@ -33,7 +33,7 @@ st.set_page_config(
 )
 
 BASE_URL = "https://www.pdga.com"
-IT_HELP_URL = "https://it-tickets-jigv.onrender.com"
+IT_HELP_URL = "https://it-tickets-jigv.onrender.com?hub_area=PDGA%20Event%20Contact%20Scraper"
 REQUEST_TIMEOUT = 30
 REQUEST_RETRY_COUNT = 4
 REQUEST_MIN_DELAY = 0.45
