@@ -25,6 +25,9 @@ LOGO_CANDIDATES = [
     APP_DIR / "assets" / "dga_logo.png",
     APP_DIR / "assets" / "dga-logo.png",
 ]
+BACKGROUND_CANDIDATES = [
+    APP_DIR / "assets" / "ahhhh-whit.png",
+]
 
 st.set_page_config(
     layout="wide",
@@ -86,13 +89,27 @@ def get_logo_path() -> Optional[Path]:
     return None
 
 
-def get_logo_data_uri() -> Optional[str]:
-    logo_path = get_logo_path()
-    if not logo_path:
+def asset_to_data_uri(asset_path: Optional[Path], mime_type: str) -> Optional[str]:
+    if not asset_path:
         return None
 
-    encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
+    encoded = base64.b64encode(asset_path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def get_logo_data_uri() -> Optional[str]:
+    return asset_to_data_uri(get_logo_path(), "image/png")
+
+
+def get_background_path() -> Optional[Path]:
+    for candidate in BACKGROUND_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def get_background_data_uri() -> Optional[str]:
+    return asset_to_data_uri(get_background_path(), "image/png")
 
 
 def render_status_log(container, title: str, lines: list[str]) -> None:
@@ -504,9 +521,28 @@ def run_scrape(
 
 def main() -> None:
     render_header()
-    st.markdown(
+    background_data_uri = get_background_data_uri()
+    app_shell_background = (
+        f"""
+        background-color: #0d0f14;
+        background-image:
+            linear-gradient(rgba(13, 15, 20, 0.86), rgba(13, 15, 20, 0.86)),
+            url("{background_data_uri}");
+        background-repeat: no-repeat;
+        background-position: center top;
+        background-size: cover;
+        background-attachment: fixed;
         """
-<style>
+        if background_data_uri
+        else "background-color: #0d0f14;"
+    )
+    style_markup = (
+        "<style>\n"
+        "[data-testid=\"stAppViewContainer\"],\n"
+        ".stApp > header {\n"
+        f"    {app_shell_background}\n"
+        "}\n"
+        """
 [data-testid="stSidebar"] { display: none; }
 [data-testid="collapsedControl"] { display: none; }
 .block-container { padding-top: 1.5rem; max-width: 1400px; }
@@ -652,9 +688,9 @@ def main() -> None:
     }
 }
 </style>
-""",
-        unsafe_allow_html=True,
+"""
     )
+    st.markdown(style_markup, unsafe_allow_html=True)
 
     placeholder_url = (
         "https://www.pdga.com/tour/search?"
