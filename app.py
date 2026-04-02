@@ -674,6 +674,49 @@ def main() -> None:
     font-size: 0.88rem;
     color: rgba(250, 250, 250, 0.66);
 }
+.input-card-shell {
+    margin-top: 0.35rem;
+}
+.input-card-marker {
+    display: block;
+    width: 100%;
+    height: 0;
+}
+div[data-testid="stVerticalBlock"]:has(.input-card-marker) {
+    gap: 0.55rem;
+    margin: 0 0 1rem;
+    padding: 1rem 1rem 1.1rem;
+    border: 1px solid rgba(160, 198, 255, 0.14);
+    border-radius: 20px;
+    background: linear-gradient(180deg, rgba(29, 34, 44, 0.52), rgba(14, 18, 26, 0.62));
+    box-shadow: 0 18px 45px rgba(0, 0, 0, 0.22);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+}
+div[data-testid="stVerticalBlock"]:has(.input-card-marker) > div[data-testid="stMarkdownContainer"] p {
+    margin: 0;
+}
+.input-card-title {
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: rgba(250, 250, 250, 0.62);
+}
+.input-card-copy {
+    margin-top: 0.2rem;
+    font-size: 0.95rem;
+    color: rgba(250, 250, 250, 0.82);
+}
+.input-card-shell .stSelectbox label,
+.input-card-shell .stTextInput label {
+    margin-bottom: 0.3rem;
+}
+.input-card-shell .stSelectbox [data-baseweb="select"] > div,
+.input-card-shell .stTextInput input {
+    border-color: rgba(160, 198, 255, 0.14);
+    background: rgba(8, 12, 19, 0.58);
+}
 .stSelectbox label, .stTextInput label {
     font-weight: 600;
 }
@@ -700,16 +743,36 @@ def main() -> None:
     )
     column_to_parse = "Name"
     result_columns = ["Name", "Dates", "Tier", "Tournament Director", "Email", "URL"]
-    tier_label = st.selectbox(
-        "Select Tier Label for CSV Column:",
-        options=["A-Tier", "B-Tier", "C-Tier", "Major", "NT", "Other"],
-        help="This value will populate the 'Tier' column for all scraped entries.",
-    )
+    with st.container():
+        st.markdown('<div class="input-card-shell"><span class="input-card-marker"></span>', unsafe_allow_html=True)
+        st.markdown(
+            """
+            <p class="input-card-title">Tier Setup</p>
+            <p class="input-card-copy">Select the label that should be applied to every scraped event in the CSV.</p>
+            """,
+            unsafe_allow_html=True,
+        )
+        tier_label = st.selectbox(
+            "Select Tier Label for CSV Column:",
+            options=["A-Tier", "B-Tier", "C-Tier", "Major", "NT", "Other"],
+            help="This value will populate the 'Tier' column for all scraped entries.",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    input_url = st.text_input(
-        "Paste the Tournament Scraper Search URL from PDGA:",
-        placeholder=placeholder_url,
-    )
+    with st.container():
+        st.markdown('<div class="input-card-shell"><span class="input-card-marker"></span>', unsafe_allow_html=True)
+        st.markdown(
+            """
+            <p class="input-card-title">Search URL</p>
+            <p class="input-card-copy">Paste the PDGA tournament search URL you want this scraper to walk through.</p>
+            """,
+            unsafe_allow_html=True,
+        )
+        input_url = st.text_input(
+            "Paste the Tournament Scraper Search URL from PDGA:",
+            placeholder=placeholder_url,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
 
     if st.button("Start Tournament Scrape 🎯"):
         if not input_url:
