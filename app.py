@@ -5,6 +5,7 @@ import random
 import base64
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 import requests
@@ -51,6 +52,16 @@ REQUEST_HEADERS = {
 }
 EMAIL_PATTERN = r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
 NOT_FOUND = "Not Found"
+TIER_LABEL_MAP = {
+    "A": "A-Tier",
+    "B": "B-Tier",
+    "C": "C-Tier",
+    "L": "League",
+    "M": "Major",
+    "NT": "NT",
+    "XC": "XC-Tier",
+    "XS": "XS-Tier",
+}
 
 
 def decode_html(text: str) -> str:
@@ -233,6 +244,37 @@ def resolve_target_column(headers: list[str], requested_column: str) -> Optional
         return fallback_column
 
     return None
+
+
+def extract_tier_labels_from_url(search_url: str) -> list[str]:
+    """Read one or more tier filters from a PDGA search URL."""
+    parsed_url = urlparse(search_url)
+    query_params = parse_qs(parsed_url.query)
+    raw_tiers = query_params.get("Tier[]") or query_params.get("Tier%5B%5D") or []
+
+    tier_labels: list[str] = []
+    for raw_tier in raw_tiers:
+        normalized_tier = raw_tier.strip().upper()
+        if not normalized_tier:
+            continue
+        tier_labels.append(TIER_LABEL_MAP.get(normalized_tier, normalized_tier))
+
+    deduped_labels = list(dict.fromkeys(tier_labels))
+    return deduped_labels or ["Other"]
+
+
+def build_tier_label(search_url: str) -> str:
+    return ", ".join(extract_tier_labels_from_url(search_url))
+
+
+def build_csv_filename(search_url: str) -> str:
+    tier_labels = extract_tier_labels_from_url(search_url)
+    tier_slug = "-".join(
+        re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+        for label in tier_labels
+    )
+    date_stamp = pd.Timestamp.now().strftime("%Y%m%d")
+    return f"tournament_scraper_contacts_{tier_slug}_{date_stamp}.csv"
 
 
 def scrape_page_links(page_content: str, column_name: str, is_tournament_mode: bool) -> tuple[list[tuple], Optional[str], str]:
@@ -431,10 +473,11 @@ def run_scrape(
     input_url: str,
     column_to_parse: str,
     result_columns: list[str],
-    tier_label: str,
 ) -> None:
     st.header("Scraping Results")
     session = create_http_session()
+    tier_label = build_tier_label(input_url)
+    csv_file_name = build_csv_filename(input_url)
     detail_links = get_detail_links(session, input_url, column_to_parse, True)
     if not detail_links:
         st.error("No links were found to process. Please double-check your search URL.")
@@ -514,7 +557,7 @@ def run_scrape(
     st.download_button(
         label="Download Data as CSV",
         data=csv,
-        file_name=f"tournament_scraper_contacts_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+        file_name=csv_file_name,
         mime="text/csv",
     )
 
@@ -735,43 +778,23 @@ div[data-testid="stVerticalBlock"]:has(.input-card-marker) > div[data-testid="st
     )
     st.markdown(style_markup, unsafe_allow_html=True)
 
-    placeholder_url = (
-        "https://www.pdga.com/tour/search?"
-        "date_filter%5Bmin%5D%5Bdate%5D=2025-10-09&"
-        "date_filter%5Bmax%5D%5Bdate%5D=2026-10-09&"
-        "State%5B%5D=CA&Tier%5B%5D=B"
-    )
     column_to_parse = "Name"
     result_columns = ["Name", "Dates", "Tier", "Tournament Director", "Email", "URL"]
     with st.container():
         st.markdown('<div class="input-card-shell"><span class="input-card-marker"></span>', unsafe_allow_html=True)
         st.markdown(
             """
-            <p class="input-card-title">Tier Setup</p>
-            <p class="input-card-copy">Select the label that should be applied to every scraped event in the CSV.</p>
-            """,
-            unsafe_allow_html=True,
-        )
-        tier_label = st.selectbox(
-            "Select Tier Label for CSV Column:",
-            options=["A-Tier", "B-Tier", "C-Tier", "Major", "NT", "Other"],
-            help="This value will populate the 'Tier' column for all scraped entries.",
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with st.container():
-        st.markdown('<div class="input-card-shell"><span class="input-card-marker"></span>', unsafe_allow_html=True)
-        st.markdown(
-            """
             <p class="input-card-title">Search URL</p>
-            <p class="input-card-copy">Paste the PDGA tournament search URL you want this scraper to walk through.</p>
             """,
             unsafe_allow_html=True,
         )
         input_url = st.text_input(
             "Paste the Tournament Scraper Search URL from PDGA:",
-            placeholder=placeholder_url,
+            label_visibility="collapsed",
         )
+        if input_url:
+            detected_tier_label = build_tier_label(input_url)
+            st.caption(f"Detected tier for CSV labeling: {detected_tier_label}")
         st.markdown("</div>", unsafe_allow_html=True)
 
     if st.button("Start Tournament Scrape 🎯"):
@@ -787,7 +810,6 @@ div[data-testid="stVerticalBlock"]:has(.input-card-marker) > div[data-testid="st
             input_url=input_url,
             column_to_parse=column_to_parse,
             result_columns=result_columns,
-            tier_label=tier_label,
         )
 
 
